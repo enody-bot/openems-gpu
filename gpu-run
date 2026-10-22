@@ -110,7 +110,7 @@ def create_pod(name, gpu, max_min, disk, image):
     return api("POST", "/pods", {
         "name": name,
         "imageName": image,
-        "cloudType": "SECURE",
+        "cloudType": "SECURE",  # always; never the Community Cloud
         "gpuTypeIds": GPUS.get(gpu, [gpu]),
         "gpuTypePriority": "custom",
         "gpuCount": 1,
