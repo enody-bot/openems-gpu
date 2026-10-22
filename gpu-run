@@ -452,10 +452,11 @@ def schedule(tasks, slots, args):
     tasks: [{"job": dir, "gpu": name or None}]. slots: [(backend, runs at a time, default gpu)], in order of
     preference: a task takes the first backend with a free slot whose GPU choice isn't cooling down. A run starts
     only if the money spent, plus the worst case of the runs going, plus its own worst case (rate x --max-min)
-    stays within --budget. "No free GPU" cools that choice down for 5 min and puts the task back (5 tries)."""
+    stays within --budget. "No free GPU" cools that choice down for 5 min and puts the task back (5 tries); a task
+    that finds no GPU in stock on any backend for 30 min is dropped (waiting for a slot or for budget doesn't count)."""
     work = Path(tempfile.mkdtemp(prefix="gpu-run-"))
     stock, stock_t, cool, n = {}, 0.0, {}, 0
-    pending = [dict(t, tries=0, since=time.time()) for t in tasks]
+    pending = [dict(t, tries=0) for t in tasks]
     running, rows, spent = {}, [], 0.0
 
     def rate(backend, gpu):  # $/h of the dearest card the choice covers; None when RunPod stocks none of them
@@ -479,9 +480,13 @@ def schedule(tasks, slots, args):
                     if r_h is None and cool.get((backend, gpu), 0) <= now:
                         cool[(backend, gpu)] = now + 300  # RunPod stocks none of this choice
                     choices.append((backend, k, gpu, r_h))
+                if all(c[3] is None for c in choices):  # no stock anywhere (or every choice cooling down)
+                    t.setdefault("no_stock_since", now)
+                else:
+                    t.pop("no_stock_since", None)
                 if all(c[3] is not None and spent + c[3] * args.max_min / 60 > args.budget for c in choices):
                     reason = "its worst case would pass the budget"
-                elif now - t["since"] > 1800:
+                elif now - t.get("no_stock_since", now) > 1800:
                     reason = "no free GPU for 30 min"
                 else:
                     reason = None
@@ -515,7 +520,7 @@ def schedule(tasks, slots, args):
                 name = Path(r["task"]["job"]).name
                 if NO_STOCK.search(s.get("error", "")) and r["task"]["tries"] < 4:
                     cool[(r["backend"], r["gpu"])] = time.time() + 300
-                    r["task"].update(tries=r["task"]["tries"] + 1, since=time.time())
+                    r["task"]["tries"] += 1
                     pending.insert(0, r["task"])  # ahead of jobs that have not started yet
                     print(f"gpu-run: {name}: no free {r['gpu']} on {r['backend']}; trying elsewhere or later", flush=True)
                     continue
