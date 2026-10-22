@@ -14,14 +14,16 @@ Look for any rule whose source is `"*"`, for example the default
 `{"action": "accept", "src": ["*"], "dst": ["*:*"]}`. `"*"` includes tagged devices, so the
 pods would get everything that rule grants. Narrow such rules before you add the pods: replace
 `"*"` with `"autogroup:member"` (the devices of tailnet members, no tagged devices) plus any tags
-that still need the access. This tailnet's machine list shows `tag:k8s` (enody-staging) and
-`tag:k8s-operator`, for example:
+that still need the access. For example, when machines tagged `tag:k8s` and `tag:k8s-operator`
+rely on that rule:
 
 ```jsonc
 {"action": "accept", "src": ["autogroup:member", "tag:k8s", "tag:k8s-operator"], "dst": ["*:*"]}
 ```
 
-The `tests` below fail on save if a pod could still reach this Mac, which catches a rule you missed.
+The `tests` below fail on save if a pod could still reach your workstation, which catches a rule
+you missed. Put your workstation's address (`tailscale ip -4` on it) in place of
+`WORKSTATION_TS_IP` first.
 
 ## 2. Merge these sections into the policy
 
@@ -60,9 +62,9 @@ next to an existing `acls` section.
       "deny":   ["tag:gpu-pod:443"]
     },
     {
-      // pods reach nothing: not each other, not a controller, not this Mac (claptrap)
+      // pods reach nothing: not each other, not a controller, not your workstation
       "src":  "tag:gpu-pod",
-      "deny": ["tag:gpu-pod:22", "tag:gpu-controller:22", "100.68.235.75:22"]
+      "deny": ["tag:gpu-pod:22", "tag:gpu-controller:22", "WORKSTATION_TS_IP:22"]
     }
   ],
 
@@ -81,9 +83,9 @@ Notes:
 - Tailscale SSH needs both rules: the grant opens port 22, and the `ssh` rule lets the connection
   log in as root. `accept` (not `check`) because gpu-run connects without a browser.
 - `autogroup:admin` covers the devices of users with the Admin role. If the editor refuses it in
-  the `ssh` rule, or your account's role isn't Admin, put your login (for example
-  `carter@enody.lighting`) in that `src` too.
-- If you drop the `tests` entry with this Mac's address, keep the other deny test.
+  the `ssh` rule, or your account's role isn't Admin, put your login email in that
+  `src` too.
+- If you drop the workstation address from the `tests`, keep the other deny entries.
 
 ## 3. OAuth client for the pods
 
