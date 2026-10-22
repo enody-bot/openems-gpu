@@ -1,0 +1,344 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""gpu-run: run an openEMS job on a RunPod GPU pod that joins the tailnet, then destroy the pod.
+
+    gpu-run <job_dir> [--gpu a100|h100|smoke|<RunPod GPU id>] [--max-min N] [--keep]
+    gpu-run bench <job_dir> [--max-min N]     the same job on an A100 and an H100: time and cost per run
+    gpu-run list                              every pod on the RunPod account
+    gpu-run kill-all [--yes]                  terminate every pod gpu-run started
+
+A job is a directory holding run.sh. gpu-run copies it (without its results/) to /scratch/job on the
+pod, runs `bash run.sh` there with the openEMS GPU build on PATH, streams the output, and copies every
+file the job created or changed to <job_dir>/results/<UTC time>-<gpu>/, next to gpu-run.log (the
+output) and gpu-run.json (GPU, times, cost). The pod is terminated at the end, on errors and on
+Ctrl-C, unless --keep.
+
+The RunPod API key comes from $RUNPOD_API_KEY or the macOS keychain item "runpod-api-key".
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+IMAGE = os.environ.get("GPU_RUN_IMAGE", "ghcr.io/enody-bot/openems-gpu:latest")
+TS_SECRET = os.environ.get("GPU_RUN_TS_SECRET", "TS_OAUTH")  # RunPod secret holding the OAuth client secret
+API = "https://rest.runpod.io/v1"
+NAME_PREFIX = "gpu-run-"
+# RunPod GPU type ids per --gpu name, tried in this order
+GPUS = {
+    "a100": ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"],
+    "h100": ["NVIDIA H100 PCIe", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"],
+    "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090"],
+}
+# The image is built with CUDA 12.6: only hosts whose driver supports 12.6 or later.
+CUDA_VERSIONS = ["12.6", "12.7", "12.8", "12.9", "13.0"]
+BOOT_TIMEOUT_S = 20 * 60  # image pull and tailnet join
+WATCHDOG_GRACE_MIN = 10   # the pod's own watchdog fires this long after --max-min
+
+
+class ApiError(Exception):
+    pass
+
+
+_key = None
+
+
+def api_key():
+    global _key
+    if _key is None:
+        _key = os.environ.get("RUNPOD_API_KEY", "")
+        if not _key and sys.platform == "darwin":
+            r = subprocess.run(["security", "find-generic-password", "-s", "runpod-api-key", "-w"],
+                               capture_output=True, text=True)
+            _key = r.stdout.strip()
+        if not _key:
+            sys.exit("gpu-run: no RunPod API key: set RUNPOD_API_KEY or add the keychain item "
+                     "runpod-api-key (README, one-time setup)")
+    return _key
+
+
+def api(method, path, body=None):
+    req = urllib.request.Request(
+        API + path, method=method,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + api_key(), "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            text = r.read().decode()
+    except urllib.error.HTTPError as e:
+        raise ApiError(f"RunPod {method} {path}: HTTP {e.code} {e.read().decode(errors='replace')[:400]}") from None
+    return json.loads(text) if text.strip() else None
+
+
+def list_pods():
+    pods = api("GET", "/pods") or []
+    return pods.get("pods", []) if isinstance(pods, dict) else pods
+
+
+def gpu_name(pod):
+    m = pod.get("machine") or {}
+    return m.get("gpuDisplayName") or (pod.get("gpu") or {}).get("displayName") or m.get("gpuTypeId") or "?"
+
+
+def hourly_rate(pod):
+    return float(pod.get("adjustedCostPerHr") or pod.get("costPerHr") or 0)
+
+
+def create_pod(name, gpu, max_min, disk, image):
+    return api("POST", "/pods", {
+        "name": name,
+        "imageName": image,
+        "cloudType": "SECURE",
+        "gpuTypeIds": GPUS.get(gpu, [gpu]),
+        "gpuTypePriority": "custom",
+        "gpuCount": 1,
+        "allowedCudaVersions": CUDA_VERSIONS,
+        "containerDiskInGb": disk,
+        "volumeInGb": 0,
+        "ports": [],
+        # RunPod fills in the secret when the pod starts; gpu-run never sees it
+        "env": {"TS_OAUTH": "{{ RUNPOD_SECRET_%s }}" % TS_SECRET,
+                "MAX_RUNTIME_MIN": str(max_min + WATCHDOG_GRACE_MIN)},
+    })
+
+
+def terminate(pod_id):
+    for _ in range(3):
+        try:
+            api("DELETE", f"/pods/{pod_id}")
+            return True
+        except Exception as e:
+            print(f"gpu-run: terminating {pod_id} failed ({e}); retrying", file=sys.stderr)
+            time.sleep(5)
+    print(f"gpu-run: COULD NOT TERMINATE POD {pod_id}: run `gpu-run kill-all` or use the RunPod console",
+          file=sys.stderr)
+    return False
+
+
+def tailnet_node(host):
+    exe = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    status = json.loads(subprocess.run([exe, "status", "--json"], capture_output=True, text=True,
+                                       check=True).stdout)
+    peers = [p for p in (status.get("Peer") or {}).values()
+             if p.get("HostName", "").lower() == host.lower() and p.get("Online")]
+    return peers[0] if peers else None
+
+
+def wait_for_node(pod_id, host, deadline):
+    t0 = last = time.time()
+    while time.time() < deadline:
+        peer = tailnet_node(host)
+        if peer:
+            return peer
+        if time.time() - last >= 60:
+            last = time.time()
+            state = api("GET", f"/pods/{pod_id}").get("desiredStatus")
+            if state in ("EXITED", "TERMINATED"):
+                raise RuntimeError(f"pod {pod_id} is {state} before joining the tailnet")
+            print(f"gpu-run: waiting for {host} ({int(last - t0)} s, pod {state})", flush=True)
+        time.sleep(5)
+    raise TimeoutError(f"{host} did not come online on the tailnet")
+
+
+class Node:
+    """A pod on the tailnet, reached with plain ssh/rsync through Tailscale SSH as root."""
+
+    def __init__(self, peer, tmp):
+        self.ip = next(a for a in peer["TailscaleIPs"] if ":" not in a)
+        # WireGuard already authenticates the peer behind this address; when the netmap carries the
+        # node's SSH host keys, pin them as well
+        keys = peer.get("sshHostKeys") or []
+        known = Path(tmp) / "known_hosts"
+        known.write_text("".join(f"{self.ip} {k}\n" for k in keys))
+        self.ssh = ["ssh", "-F", "/dev/null", "-l", "root",
+                    "-o", f"UserKnownHostsFile={known}",
+                    "-o", "StrictHostKeyChecking=" + ("yes" if keys else "accept-new"),
+                    "-o", "BatchMode=yes", "-o", "ConnectTimeout=30",
+                    "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
+
+    def run(self, command, **kw):
+        return subprocess.run(self.ssh + [self.ip, command], **kw)
+
+    def rsync(self, src, dst, *opts):
+        subprocess.run(["rsync", "-a", "-e", shlex.join(self.ssh), *opts, src, dst], check=True)
+
+    def follow(self, log, deadline):
+        """Stream the job's output until it ends, reconnecting after a dropped connection; its exit status."""
+        offset = 0
+        while True:
+            left = int(deadline - time.time())
+            if left <= 0:
+                raise TimeoutError("--max-min reached")
+            p = subprocess.Popen(self.ssh + [self.ip, f"timeout {left} gpu-job follow {offset}"],
+                                 stdout=subprocess.PIPE)
+            while chunk := p.stdout.read1(65536):
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.flush()
+                log.write(chunk)
+                offset += len(chunk)
+            p.wait()
+            r = self.run("cat /scratch/run/exit", capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.strip():
+                return int(r.stdout)
+            if time.time() < deadline:
+                print(f"gpu-run: output stream ended (ssh {p.returncode}) while the job runs; reconnecting",
+                      file=sys.stderr)
+                time.sleep(10)
+
+
+def fmt_s(s):
+    return f"{int(s // 60)}m {int(s % 60):02d}s"
+
+
+def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE):
+    job = Path(job).resolve()
+    if not (job / "run.sh").is_file():
+        sys.exit(f"gpu-run: {job}/run.sh not found")
+    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    out = job / "results" / f"{stamp}-{re.sub(r'[^a-z0-9]+', '-', gpu.lower()).strip('-')}"
+    t_create = time.time()
+    deadline = t_create + max_min * 60
+
+    pod = create_pod(f"{NAME_PREFIX}{job.name}", gpu, max_min, disk, image)
+    pod_id, rate = pod["id"], hourly_rate(pod)
+    host = f"gpu-{pod_id}"
+    print(f"gpu-run: pod {pod_id} ({gpu}, ${rate:.2f}/h, {image}); waiting for {host}", flush=True)
+    summary = {"job": str(job), "gpu": gpu, "pod_id": pod_id, "image": image, "rate_per_h": rate}
+    node = None
+    try:
+        peer = wait_for_node(pod_id, host, min(deadline, t_create + BOOT_TIMEOUT_S))
+        pod = api("GET", f"/pods/{pod_id}")
+        summary.update(gpu_type=gpu_name(pod), boot_s=round(time.time() - t_create))
+        print(f"gpu-run: {host} is up after {fmt_s(summary['boot_s'])} on {summary['gpu_type']}", flush=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            node = Node(peer, tmp)
+            node.rsync(f"{job}/", f"{node.ip}:/scratch/job/", "--exclude=/results/")
+            node.run("gpu-job start", check=True)
+            out.mkdir(parents=True)
+            t_start = time.time()
+            try:
+                with open(out / "gpu-run.log", "wb") as log:
+                    summary["exit_status"] = node.follow(log, deadline)
+            except TimeoutError as e:
+                print(f"gpu-run: {e}; copying back what the job has written", file=sys.stderr)
+                summary["exit_status"] = "timeout"
+            summary["job_s"] = round(time.time() - t_start)
+            # every file the job created or changed (files equal to the job's own are skipped)
+            node.rsync(f"{node.ip}:/scratch/job/", f"{out}/", f"--compare-dest={job}/")
+            for d in sorted(out.rglob("*"), reverse=True):  # directories that only held inputs
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            summary["results"] = str(out)
+    finally:
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, signal.SIG_IGN)  # a second Ctrl-C must not skip the termination
+        if keep:
+            where = f"ssh -l root {node.ip}" if node else f"ssh root@{host} (once it is online)"
+            print(f"gpu-run: --keep: pod {pod_id} is still running and billing; {where}; "
+                  f"its watchdog stops it {max_min + WATCHDOG_GRACE_MIN} min after creation; "
+                  f"end it with `gpu-run kill-all`", file=sys.stderr)
+        else:
+            terminate(pod_id)
+        summary["pod_s"] = round(time.time() - t_create)
+        summary["cost_est"] = round(rate * summary["pod_s"] / 3600, 4)
+        if out.is_dir():
+            (out / "gpu-run.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"\ngpu-run: exit status {summary.get('exit_status', '-')}"
+              f"\n  GPU             {summary.get('gpu_type', gpu)}"
+              f"\n  job wall time   {fmt_s(summary['job_s']) if 'job_s' in summary else '-'}"
+              f"\n  pod time        {fmt_s(summary['pod_s'])} (created to {'now' if keep else 'terminated'})"
+              f"\n  estimated cost  ${summary['cost_est']:.2f} at ${rate:.2f}/h"
+              f"\n  results         {summary.get('results', '-')}", flush=True)
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, signal.default_int_handler)
+    return summary
+
+
+def cmd_bench(args):
+    rows = []
+    for gpu in ("a100", "h100"):
+        try:
+            rows.append(run_job(args.job_dir, gpu, args.max_min, disk=args.disk, image=args.image))
+        except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
+            print(f"gpu-run: bench on {gpu} failed: {e}", file=sys.stderr)
+            rows.append({"gpu": gpu, "error": str(e)})
+    print(f"\n{'GPU':<26} {'job':>9} {'pod':>9} {'$/h':>6} {'$/run':>7} {'$ job only':>10}  exit")
+    for r in rows:
+        if "job_s" not in r:
+            print(f"{r.get('gpu_type', r['gpu']):<26} failed: {r.get('error', r.get('exit_status'))}")
+            continue
+        print(f"{r['gpu_type']:<26} {fmt_s(r['job_s']):>9} {fmt_s(r['pod_s']):>9} {r['rate_per_h']:>6.2f} "
+              f"{r['cost_est']:>7.2f} {r['rate_per_h'] * r['job_s'] / 3600:>10.2f}  {r['exit_status']}")
+
+
+def cmd_list(args):
+    pods = list_pods()
+    for p in pods:
+        print(f"{p['id']:<16} {p.get('desiredStatus', ''):<11} {gpu_name(p):<26} "
+              f"${hourly_rate(p):>5.2f}/h  {p.get('name', '')}")
+    if not pods:
+        print("gpu-run: no pods on the account")
+
+
+def cmd_kill_all(args):
+    pods = [p for p in list_pods() if p.get("name", "").startswith(NAME_PREFIX)]
+    if not pods:
+        print("gpu-run: no gpu-run pods")
+        return
+    for p in pods:
+        print(f"{p['id']:<16} {p.get('desiredStatus', ''):<11} {gpu_name(p):<26} {p.get('name', '')}")
+    if not args.yes and input(f"terminate these {len(pods)} pods? [y/N] ").strip().lower() != "y":
+        return
+    for p in pods:
+        if terminate(p["id"]):
+            print(f"gpu-run: terminated {p['id']}")
+
+
+def main():
+    for s in (signal.SIGTERM, signal.SIGHUP):  # a closed terminal or a kill still terminates the pod
+        signal.signal(s, signal.default_int_handler)
+    argv = sys.argv[1:]
+    if argv and argv[0] not in ("run", "bench", "list", "kill-all", "-h", "--help"):
+        argv = ["run"] + argv
+    ap = argparse.ArgumentParser(prog="gpu-run", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("run", "bench"):
+        p = sub.add_parser(name)
+        p.add_argument("job_dir")
+        if name == "run":
+            p.add_argument("--gpu", default="a100", help="a100, h100, smoke (cheap sm_86 cards) or a RunPod GPU id")
+            p.add_argument("--keep", action="store_true", help="leave the pod running (debugging)")
+        p.add_argument("--max-min", type=int, default=240, help="give up on the job after N minutes")
+        p.add_argument("--disk", type=int, default=100, help="container disk in GB (holds /scratch)")
+        p.add_argument("--image", default=IMAGE)
+    sub.add_parser("list")
+    sub.add_parser("kill-all").add_argument("--yes", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        if args.cmd == "run":
+            r = run_job(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image)
+            sys.exit(0 if r.get("exit_status") == 0 else 1)
+        {"bench": cmd_bench, "list": cmd_list, "kill-all": cmd_kill_all}[args.cmd](args)
+    except KeyboardInterrupt:
+        sys.exit("\ngpu-run: interrupted")
+    except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
+        sys.exit(f"gpu-run: {e}")
+
+
+if __name__ == "__main__":
+    main()

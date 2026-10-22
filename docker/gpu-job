@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Runs the job in /scratch/job (its run.sh) on the pod.
+#   gpu-job run          in the foreground (a local `docker run`, no tailnet)
+#   gpu-job start        detached from the SSH session, so a dropped connection leaves it running
+#   gpu-job follow [N]   print its output from byte N until it ends (gpu-run reconnects with N)
+# A started job leaves its output in /scratch/run/log and its exit status in /scratch/run/exit.
+set -euo pipefail
+. /etc/profile.d/openems.sh
+JOB=/scratch/job
+RUN=/scratch/run
+
+case "${1:-}" in
+  run)
+    cd "$JOB"
+    exec bash run.sh
+    ;;
+  start)
+    mkdir -p "$RUN"
+    rm -f "$RUN/pid" "$RUN/exit"
+    setsid bash -c 'echo $$ > "$1/pid"; cd "$2" && bash run.sh; echo $? > "$1/exit"' _ "$RUN" "$JOB" \
+      >"$RUN/log" 2>&1 </dev/null &
+    ;;
+  follow)
+    until [ -s "$RUN/pid" ]; do sleep 0.2; done
+    exec tail -c +"$((${2:-0} + 1))" --pid="$(cat "$RUN/pid")" -f "$RUN/log"
+    ;;
+  *)
+    echo "usage: gpu-job run | start | follow [byte-offset]" >&2
+    exit 2
+    ;;
+esac
