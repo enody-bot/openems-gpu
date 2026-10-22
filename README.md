@@ -95,11 +95,11 @@ died (laptop asleep, network gone).
   the policy lets admins and `tag:gpu-controller` reach but lets reach nothing, and logs out on
   exit. Jobs run on `/scratch`, the pod's container disk on local NVMe, never a network mount.
 - **Self-stop.** RunPod gives each pod a pod-scoped `RUNPOD_API_KEY` (its docs call it
-  "Pod-scoped API key" and say no more). The watchdog uses that key, never your account key. It
-  tries terminate (REST v1, REST v2, GraphQL) and then stop, and logs each HTTP status. Community
-  reports differ on whether that key may stop its own pod. **Until a smoke test shows one of those
-  calls succeeding, count on gpu-run's `finally` and `gpu-run list` / `kill-all`, not on the
-  watchdog.**
+  "Pod-scoped API key" and say no more). The watchdog uses that key, never your account key. Tested
+  2026-10-22 on an RTX A6000 pod: the REST v2 terminate succeeded (HTTP 204, the pod and its tailnet
+  node gone within 15 s) and REST v1 was refused (403). The watchdog tries v2 first, then the others,
+  and logs each HTTP status. gpu-run's `finally` stays the main guard; `gpu-run list` / `kill-all`
+  clean up anything left.
 
 ## CUDA version
 

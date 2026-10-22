@@ -24,17 +24,18 @@ api() {
   BODY=$(cat /tmp/runpod-api.out 2>/dev/null)
 }
 
-# Terminate this pod (stop it if termination is refused). RunPod documents the pod-scoped key but
-# not which calls it may make, so try the endpoints in turn and log each answer's status code.
+# Terminate this pod (stop it if termination is refused). RunPod documents the pod-scoped key but not which
+# calls it may make: on 2026-10-22 the REST v2 terminate worked (HTTP 204) and REST v1 was refused (403), so v2
+# goes first and the rest stay as fallbacks. Each answer's status code is logged.
 self_stop() {
   if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_POD_ID:-}" ]; then
     echo "watchdog: no pod-scoped RunPod key; gpu-run (or gpu-run kill-all) must terminate this pod"
     return 1
   fi
   local id=$RUNPOD_POD_ID
-  api DELETE "https://rest.runpod.io/v1/pods/$id"; echo "watchdog: terminate (REST v1) -> HTTP $CODE"
-  case "$CODE" in 2??) return 0 ;; esac
   api DELETE "https://api.runpod.io/v2/pods/$id"; echo "watchdog: terminate (REST v2) -> HTTP $CODE"
+  case "$CODE" in 2??) return 0 ;; esac
+  api DELETE "https://rest.runpod.io/v1/pods/$id"; echo "watchdog: terminate (REST v1) -> HTTP $CODE"
   case "$CODE" in 2??) return 0 ;; esac
   api POST https://api.runpod.io/graphql "{\"query\":\"mutation { podTerminate(input: {podId: \\\"$id\\\"}) }\"}"
   echo "watchdog: terminate (GraphQL) -> HTTP $CODE"
