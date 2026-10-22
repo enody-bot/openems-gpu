@@ -7,6 +7,7 @@
 
     gpu-run <job_dir> [--gpu a100|h100|smoke|<RunPod GPU id>] [--max-min N] [--keep]
     gpu-run bench <job_dir> [--max-min N]     the same job on an A100 and an H100: time and cost per run
+    gpu-run gpus                              Secure Cloud GPUs in stock now, with prices
     gpu-run list                              every pod on the RunPod account
     gpu-run kill-all [--yes]                  terminate every pod gpu-run started
 
@@ -42,7 +43,9 @@ NAME_PREFIX = "gpu-run-"
 GPUS = {
     "a100": ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"],
     "h100": ["NVIDIA H100 PCIe", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"],
-    "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090"],
+    # cheap cards for smoke tests, cheapest first; Secure Cloud often stocks only the last two
+    "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090",
+              "NVIDIA RTX A6000", "NVIDIA L4"],
 }
 # The image is built with CUDA 12.6: only hosts whose driver supports 12.6 or later.
 CUDA_VERSIONS = ["12.6", "12.7", "12.8", "12.9", "13.0"]
@@ -287,6 +290,23 @@ def cmd_bench(args):
               f"{r['cost_est']:>7.2f} {r['rate_per_h'] * r['job_s'] / 3600:>10.2f}  {r['exit_status']}")
 
 
+def cmd_gpus(args):
+    """Secure Cloud GPU types in stock now, cheapest first (RunPod's GraphQL API; REST has no stock query)."""
+    q = ("query { gpuTypes { id memoryInGb secureCloud "
+         "lowestPrice(input: {gpuCount: 1, secureCloud: true}) { uninterruptablePrice stockStatus } } }")
+    req = urllib.request.Request(
+        "https://api.runpod.io/graphql", method="POST", data=json.dumps({"query": q}).encode(),
+        headers={"Authorization": "Bearer " + api_key(), "Content-Type": "application/json",
+                 "User-Agent": "gpu-run/1 (openems-gpu)"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        types = json.load(r)["data"]["gpuTypes"]
+    rows = sorted((t["lowestPrice"]["uninterruptablePrice"] or 0, t["id"], t["memoryInGb"], t["lowestPrice"]["stockStatus"])
+                  for t in types if t.get("secureCloud") and (t.get("lowestPrice") or {}).get("stockStatus"))
+    aliases = {i: name for name, ids in GPUS.items() for i in ids}
+    for price, gid, mem, stock in rows:
+        print(f"${price:>5.2f}/h  {gid:<48} {mem:>4} GB  {stock:<7} {aliases.get(gid, '')}")
+
+
 def cmd_list(args):
     pods = list_pods()
     for p in pods:
@@ -314,7 +334,7 @@ def main():
     for s in (signal.SIGTERM, signal.SIGHUP):  # a closed terminal or a kill still terminates the pod
         signal.signal(s, signal.default_int_handler)
     argv = sys.argv[1:]
-    if argv and argv[0] not in ("run", "bench", "list", "kill-all", "-h", "--help"):
+    if argv and argv[0] not in ("run", "bench", "gpus", "list", "kill-all", "-h", "--help"):
         argv = ["run"] + argv
     ap = argparse.ArgumentParser(prog="gpu-run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -323,11 +343,12 @@ def main():
         p = sub.add_parser(name)
         p.add_argument("job_dir")
         if name == "run":
-            p.add_argument("--gpu", default="a100", help="a100, h100, smoke (cheap sm_86 cards) or a RunPod GPU id")
+            p.add_argument("--gpu", default="a100", help="a100, h100, smoke (the cheapest cards) or a RunPod GPU id")
             p.add_argument("--keep", action="store_true", help="leave the pod running (debugging)")
         p.add_argument("--max-min", type=int, default=240, help="give up on the job after N minutes")
         p.add_argument("--disk", type=int, default=100, help="container disk in GB (holds /scratch)")
         p.add_argument("--image", default=IMAGE)
+    sub.add_parser("gpus")
     sub.add_parser("list")
     sub.add_parser("kill-all").add_argument("--yes", action="store_true")
     args = ap.parse_args(argv)
@@ -335,11 +356,12 @@ def main():
         if args.cmd == "run":
             r = run_job(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image)
             sys.exit(0 if r.get("exit_status") == 0 else 1)
-        {"bench": cmd_bench, "list": cmd_list, "kill-all": cmd_kill_all}[args.cmd](args)
+        {"bench": cmd_bench, "gpus": cmd_gpus, "list": cmd_list, "kill-all": cmd_kill_all}[args.cmd](args)
     except KeyboardInterrupt:
         sys.exit("\ngpu-run: interrupted")
     except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
-        sys.exit(f"gpu-run: {e}")
+        hint = "\n(`gpu-run gpus` shows what Secure Cloud has in stock)" if "no instances" in str(e) else ""
+        sys.exit(f"gpu-run: {e}{hint}")
 
 
 if __name__ == "__main__":

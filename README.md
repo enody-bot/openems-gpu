@@ -56,7 +56,8 @@ sm_86 (3080, A-series) and sm_90 (H100).
 ```bash
 ./gpu-run path/to/job                       # A100 80 GB, 240 min limit
 ./gpu-run path/to/job --gpu h100 --max-min 90
-./gpu-run path/to/job --gpu smoke           # cheapest sm_86 cards: RTX A4000 / A4500 / A5000 / 3090
+./gpu-run path/to/job --gpu smoke           # cheapest cards first: A4000 ... 3090, A6000, L4 (Secure Cloud stock varies)
+./gpu-run gpus                              # Secure Cloud GPUs in stock now, with prices
 ./gpu-run path/to/job --keep                # leave the pod up for debugging; prints how to reach it
 ./gpu-run bench path/to/job                 # same job on an A100, then an H100: time and $ per run
 ./gpu-run list                              # every pod on the account
