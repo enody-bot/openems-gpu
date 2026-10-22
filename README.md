@@ -1,8 +1,10 @@
 # openems-gpu
 
-Run an openEMS simulation on a rented cloud GPU with one command. `gpu-run` starts a RunPod pod from
-this repo's image, waits for it to join the tailnet as an ephemeral, locked-down node, copies the
-job over Tailscale SSH, streams its output, copies the results back and terminates the pod.
+Run openEMS simulations on rented cloud GPUs, one or many at a time. `gpu-run` starts a RunPod pod
+from this repo's image, waits for it to join the tailnet as an ephemeral, locked-down node, copies the
+job over Tailscale SSH, streams its output, copies the results back and terminates the pod. `gpu-run
+sweep` runs many jobs at once under a budget, on RunPod's cheap cards first and on Modal (B200 / H200 /
+H100 sandboxes from the same image) when RunPod has none free.
 
 ```
 Mac ── gpu-run ──> RunPod API: create pod (Secure Cloud, A100 / H100, this image, TS_OAUTH secret)
@@ -20,7 +22,7 @@ sm_86 (3080, A-series) and sm_90 (H100).
 
 | File | What it is |
 |---|---|
-| `gpu-run` | the launcher (single-file Python, run by `uv`; no dependencies) |
+| `gpu-run` | the launcher (single-file Python run by `uv`; its only dependency is `modal`) |
 | `Dockerfile` | two-stage build: CUDA 12.6 devel to build, CUDA 12.6 base + runtime libraries, tailscale, rsync, ssh client |
 | `docker/entrypoint.sh` | pod start: watchdog, `tailscaled`, `tailscale up`, `tailscale logout` on exit |
 | `docker/gpu-job` | runs the job on the pod, detached from the SSH session, and streams its log |
@@ -50,6 +52,12 @@ sm_86 (3080, A-series) and sm_90 (H100).
    make the package public once: GitHub, **enody-bot > Packages > openems-gpu > Package settings >
    Change visibility > Public**. RunPod then pulls it without a registry credential.
 5. **On the Mac:** `uv` and the Tailscale app. gpu-run finds the app's CLI by itself.
+6. **Modal (for `--backend modal` and `sweep --modal N`).** Sign in once; this opens a browser and writes
+   the token to `~/.modal.toml` (it never goes into the repo or a sandbox):
+   ```bash
+   uvx modal token new
+   ```
+   The Starter plan includes $30 of compute a month and runs at most 10 GPUs at a time (Team: 50).
 
 ## Day to day
 
@@ -63,9 +71,38 @@ sm_86 (3080, A-series) and sm_90 (H100).
 ./gpu-run bench path/to/job --gpus a100,h100,"NVIDIA L40S" --parallel 3 --budget 10 --max-min 20
                                             # any GPUs, 3 at a time; never starts a run whose worst case
                                             # (rate x --max-min) could take spending past the budget
-./gpu-run list                              # every pod on the account
-./gpu-run kill-all                          # terminate every gpu-run pod (asks first; --yes skips)
+./gpu-run path/to/job --backend modal --gpu fast   # one job in a Modal sandbox: B200, else H200, else H100
+./gpu-run list                              # every pod on the account, and gpu-run's Modal sandboxes
+./gpu-run kill-all                          # terminate every gpu-run pod and sandbox (asks first; --yes skips)
 ```
+
+**Sweeps.** One job directory per variant; each runs on its own GPU and its results land in that
+directory's `results/`, as with a single run.
+
+```bash
+./gpu-run sweep variants/*/ --budget 15 --max-min 90                    # RunPod "cheap" pool, 4 at a time
+./gpu-run sweep variants/*/ --budget 40 --max-min 90 --runpod 8 --modal 10
+                                            # 8 RunPod pods and up to 10 Modal sandboxes at once
+./gpu-run sweep variants/*/ --budget 30 --max-min 45 --runpod 6 --runpod-gpu fast
+```
+
+- A job takes the first backend with a free slot: RunPod, then Modal. When RunPod has no card of the
+  pool free, that pool cools down for 5 minutes and its jobs go to Modal (or wait).
+- `--budget` is required. A run starts only if what is spent, plus the worst case (rate x `--max-min`) of
+  every run going, plus its own worst case stays within it; a job that could never fit is not run.
+- RunPod pools, from the benchmark (`src/openems_bench` in the workspace): **cheap** (cost per run): RTX
+  A5000, RTX PRO 4500 Blackwell, RTX A6000, RTX PRO 4000 Blackwell, RTX 4090, RTX 6000 Ada; **fast**
+  (speed): B200, H200, H100 SXM, H100 NVL, RTX PRO 6000 Blackwell. Also `a100`, `h100`, `smoke` or a
+  RunPod GPU id. Modal: **fast** (B200, H200, H100), **cheap** (L40S, A100 80 GB), `b200`, `h200`,
+  `h100`, `a100`, `l40s` or a Modal GPU name. For LP01-sized runs the cheap pool is about 3080 speed
+  for about $0.30 a run; the fast pool is about 3x faster for about $2-3.
+
+**Modal** runs the same image (its tailnet entrypoint cleared) in a Modal Sandbox: no tailnet, no
+SSH. gpu-run resolves the image tag to its digest first, because Modal caches image builds by name.
+The job goes in and its new or changed files come back as tarballs (up to 5 GB). The sandbox has 4
+cores and 32 GiB for the model setup, billed with the GPU (prices in `gpu-run`, from modal.com/pricing,
+October 2026). Modal ends the sandbox at `--max-min` even if gpu-run dies. The first sandbox from a new
+image waits a few minutes while Modal builds it.
 
 **A job** is a directory with a `run.sh`. On the pod it is `/scratch/job` (without its `results/`),
 `run.sh` runs there with the openEMS venv's `python`, `openEMS` and `nvidia-smi` on PATH, and its

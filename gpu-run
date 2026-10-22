@@ -1,24 +1,28 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["modal>=1.6"]
 # ///
-"""gpu-run: run an openEMS job on a RunPod GPU pod that joins the tailnet, then destroy the pod.
+"""gpu-run: run openEMS jobs on rented GPUs (RunPod Secure Cloud pods, Modal sandboxes), then end them.
 
-    gpu-run <job_dir> [--gpu a100|h100|smoke|<RunPod GPU id>] [--max-min N] [--keep]
+    gpu-run <job_dir> [--backend runpod|modal] [--gpu NAME] [--max-min N] [--keep]
+    gpu-run sweep <job_dir>... --budget USD [--runpod N] [--runpod-gpu cheap] [--modal N] [--modal-gpu fast]
+                                              many jobs at once, each on its own GPU; RunPod first, Modal
+                                              when RunPod has none free
     gpu-run bench <job_dir> [--gpus a100,h100,...] [--budget USD] [--parallel N] [--max-min N]
-                                              the same job on several GPUs: time and cost per run
-    gpu-run gpus                              Secure Cloud GPUs in stock now, with prices
-    gpu-run list                              every pod on the RunPod account
-    gpu-run kill-all [--yes]                  terminate every pod gpu-run started
+                                              the same job on several RunPod GPUs: time and cost per run
+    gpu-run gpus                              RunPod Secure Cloud GPUs in stock now, with prices
+    gpu-run list                              RunPod pods and gpu-run's Modal sandboxes
+    gpu-run kill-all [--yes]                  terminate every pod and sandbox gpu-run started
 
-A job is a directory holding run.sh. gpu-run copies it (without its results/) to /scratch/job on the
-pod, runs `bash run.sh` there with the openEMS GPU build on PATH, streams the output, and copies every
-file the job created or changed to <job_dir>/results/<UTC time>-<gpu>/, next to gpu-run.log (the
-output) and gpu-run.json (GPU, times, cost). The pod is terminated at the end, on errors and on
-Ctrl-C, unless --keep.
+A job is a directory holding run.sh. gpu-run copies it (without its results/) to /scratch/job, runs `bash
+run.sh` there with the openEMS GPU build on PATH, streams the output, and copies every file the job created
+or changed to <job_dir>/results/<UTC time>-<gpu>/, next to gpu-run.log (the output) and gpu-run.json (GPU,
+times, cost). The pod or sandbox is ended at the end, on errors and on Ctrl-C (RunPod: unless --keep).
 
-The RunPod API key comes from $RUNPOD_API_KEY or the macOS keychain item "runpod-api-key".
+  runpod  a Secure Cloud pod (never Community Cloud) that joins the tailnet; jobs run over Tailscale SSH.
+          The API key comes from $RUNPOD_API_KEY or the macOS keychain item "runpod-api-key".
+  modal   a Modal Sandbox from the same image; files move as tarballs. Credentials: `modal token new`.
 """
 import argparse
 import datetime
@@ -30,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -40,14 +45,29 @@ IMAGE = os.environ.get("GPU_RUN_IMAGE", "ghcr.io/enody-bot/openems-gpu:latest")
 TS_SECRET = os.environ.get("GPU_RUN_TS_SECRET", "TS_OAUTH")  # RunPod secret holding the OAuth client secret
 API = "https://rest.runpod.io/v1"
 NAME_PREFIX = "gpu-run-"
-# RunPod GPU type ids per --gpu name, tried in this order
+# RunPod GPU type ids per --gpu name, tried in this order. "cheap" is ordered by cost per run and "fast" by
+# speed, from the 2026-10-22 openEMS benchmark (src/openems_bench in the workspace, not in this repo).
 GPUS = {
+    "cheap": ["NVIDIA RTX A5000", "NVIDIA RTX PRO 4500 Blackwell", "NVIDIA RTX A6000", "NVIDIA RTX PRO 4000 Blackwell",
+              "NVIDIA GeForce RTX 4090", "NVIDIA RTX 6000 Ada Generation"],
+    "fast": ["NVIDIA B200", "NVIDIA H200", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL",
+             "NVIDIA RTX PRO 6000 Blackwell Server Edition"],
     "a100": ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"],
     "h100": ["NVIDIA H100 PCIe", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"],
     # cheap cards for smoke tests, cheapest first; Secure Cloud often stocks only the last two
     "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090",
               "NVIDIA RTX A6000", "NVIDIA L4"],
 }
+# Modal GPU names per --gpu name, tried in this order ("H100" may get an H200 at the H100 price), and Modal's
+# prices in $/s (modal.com/pricing, 2026-10-22). Its B300 needs a CUDA 13 image, so it is left out.
+MODAL_APP = "gpu-run"
+MODAL_GPUS = {"fast": ["B200", "H200", "H100"], "cheap": ["L40S", "A100-80GB"], "b200": ["B200"], "h200": ["H200"],
+              "h100": ["H100"], "a100": ["A100-80GB"], "l40s": ["L40S"]}
+MODAL_PRICE_S = {"B200": 0.001736, "H200": 0.001261, "H100": 0.001097, "RTX-PRO-6000": 0.000842,
+                 "A100-80GB": 0.000694, "L40S": 0.000542, "A10": 0.000306, "L4": 0.000222}
+MODAL_CPU, MODAL_MEM_GIB = 4, 32                   # per sandbox: model setup runs on the CPU
+MODAL_CPU_S, MODAL_MEM_S = 0.0000131, 0.00000222   # $ per physical core and per GiB, per second
+
 # The image is built with CUDA 12.6, so the host driver must support 12.6 or later. RunPod's REST filter
 # (allowedCudaVersions) stops at 13.0 while its hosts already run 13.2 (2026-10), so gpu-run checks the
 # driver on the pod instead.
@@ -223,16 +243,36 @@ def fmt_s(s):
     return f"{int(s // 60)}m {int(s % 60):02d}s"
 
 
-def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary=None):
-    """Run one job on one pod. `summary` (filled in as the run goes) holds the times and cost even when the
-    run raises."""
-    summary = {} if summary is None else summary
-    summary["gpu"] = gpu
+def new_run(job, gpu, backend, summary):
+    """Check the job, start its summary and name its results directory."""
     job = Path(job).resolve()
     if not (job / "run.sh").is_file():
-        sys.exit(f"gpu-run: {job}/run.sh not found")
+        raise RuntimeError(f"{job}/run.sh not found")
+    summary.update(job=str(job), gpu=gpu, backend=backend)
     stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
-    out = job / "results" / f"{stamp}-{re.sub(r'[^a-z0-9]+', '-', gpu.lower()).strip('-')}"
+    slug = re.sub(r"[^a-z0-9]+", "-", gpu.lower()).strip("-") + ("-modal" if backend == "modal" else "")
+    return job, job / "results" / f"{stamp}-{slug}"
+
+
+def finish(summary, t_create, rate, out, keep=False):
+    """Lifetime and cost of the pod or sandbox, gpu-run.json, and the closing summary."""
+    summary["pod_s"] = round(time.time() - t_create)
+    summary["cost_est"] = round(rate * summary["pod_s"] / 3600, 4)
+    if out.is_dir():
+        (out / "gpu-run.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"\ngpu-run: exit status {summary.get('exit_status', '-')}"
+          f"\n  GPU             {summary.get('gpu_type', summary['gpu'])} ({summary['backend']})"
+          f"\n  job wall time   {fmt_s(summary['job_s']) if 'job_s' in summary else '-'}"
+          f"\n  pod time        {fmt_s(summary['pod_s'])} (created to {'now' if keep else 'terminated'})"
+          f"\n  estimated cost  ${summary['cost_est']:.2f} at ${rate:.2f}/h"
+          f"\n  results         {summary.get('results', '-')}", flush=True)
+
+
+def run_job_runpod(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary=None):
+    """Run one job on one RunPod pod. `summary` (filled in as the run goes) holds the times and cost even when
+    the run raises."""
+    summary = {} if summary is None else summary
+    job, out = new_run(job, gpu, "runpod", summary)
     t_create = time.time()
     deadline = t_create + max_min * 60
 
@@ -240,7 +280,7 @@ def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary=None):
     pod_id, rate = pod["id"], hourly_rate(pod)
     host = f"gpu-{pod_id}"
     print(f"gpu-run: pod {pod_id} ({gpu}, ${rate:.2f}/h, {image}); waiting for {host}", flush=True)
-    summary.update(job=str(job), pod_id=pod_id, image=image, rate_per_h=rate)
+    summary.update(pod_id=pod_id, image=image, rate_per_h=rate)
     node = None
     try:
         peer = wait_for_node(pod_id, host, min(deadline, t_create + BOOT_TIMEOUT_S))
@@ -281,19 +321,114 @@ def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary=None):
                   f"end it with `gpu-run kill-all`", file=sys.stderr)
         else:
             terminate(pod_id)
-        summary["pod_s"] = round(time.time() - t_create)
-        summary["cost_est"] = round(rate * summary["pod_s"] / 3600, 4)
-        if out.is_dir():
-            (out / "gpu-run.json").write_text(json.dumps(summary, indent=2) + "\n")
-        print(f"\ngpu-run: exit status {summary.get('exit_status', '-')}"
-              f"\n  GPU             {summary.get('gpu_type', gpu)}"
-              f"\n  job wall time   {fmt_s(summary['job_s']) if 'job_s' in summary else '-'}"
-              f"\n  pod time        {fmt_s(summary['pod_s'])} (created to {'now' if keep else 'terminated'})"
-              f"\n  estimated cost  ${summary['cost_est']:.2f} at ${rate:.2f}/h"
-              f"\n  results         {summary.get('results', '-')}", flush=True)
+        finish(summary, t_create, rate, out, keep)
         for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(s, signal.default_int_handler)
     return summary
+
+
+def modal_rate(gpu):
+    """$/h of the dearest GPU a Modal --gpu name may get, plus the sandbox's CPU and memory."""
+    names = MODAL_GPUS.get(gpu, [gpu])
+    if any(n not in MODAL_PRICE_S for n in names):
+        raise RuntimeError(f"unknown Modal GPU {gpu!r}: use one of {', '.join(MODAL_GPUS)} or {', '.join(MODAL_PRICE_S)}")
+    return 3600 * (max(MODAL_PRICE_S[n] for n in names) + MODAL_CPU * MODAL_CPU_S + MODAL_MEM_GIB * MODAL_MEM_S)
+
+
+def sandbox_sh(sb, command):
+    """Run a shell command in a Modal sandbox; its output."""
+    p = sb.exec("bash", "-c", command)
+    text = p.stdout.read()
+    p.wait()
+    if p.returncode:
+        raise RuntimeError(f"{command!r} failed in the sandbox: {p.stderr.read().strip()[-300:]}")
+    return text
+
+
+def image_digest(image):
+    """repo@sha256:... for a public ghcr.io image tag. Modal caches an image build by its name, so a moved tag
+    such as :latest would keep the old build there; the digest names the exact image."""
+    repo, _, tag = image.rpartition(":")
+    if "@" in image or not repo.startswith("ghcr.io/"):
+        return image
+    name = repo.removeprefix("ghcr.io/")
+    with urllib.request.urlopen(f"https://ghcr.io/token?scope=repository:{name}:pull", timeout=30) as r:
+        token = json.load(r)["token"]
+    req = urllib.request.Request(f"https://ghcr.io/v2/{name}/manifests/{tag}", method="HEAD", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return f"{repo}@{r.headers['Docker-Content-Digest']}"
+
+
+def run_job_modal(job, gpu, max_min, image=IMAGE, summary=None):
+    """Run one job in a Modal Sandbox: the same image with its tailnet entrypoint cleared, the same gpu-job.
+    Files go in and come back as tarballs; the sandbox's own timeout (--max-min) ends it even if gpu-run dies."""
+    import modal
+
+    summary = {} if summary is None else summary
+    job, out = new_run(job, gpu, "modal", summary)
+    gpus = MODAL_GPUS.get(gpu, [gpu])
+    rate = modal_rate(gpu)
+    image = image_digest(image)
+    summary.update(image=image, rate_per_h=round(rate, 3))
+    t_create = time.time()
+    deadline = t_create + max_min * 60
+    sb = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tar_in, tar_out = Path(tmp) / "job.tar.gz", Path(tmp) / "out.tar.gz"
+            with tarfile.open(tar_in, "w:gz") as t:
+                t.add(job, arcname=".", filter=lambda m: None if m.name == "./results" or m.name.startswith("./results/") else m)
+            sb = modal.Sandbox.create(
+                "sleep", "infinity", app=modal.App.lookup(MODAL_APP, create_if_missing=True),
+                image=modal.Image.from_registry(image).entrypoint([]), gpu=gpus, timeout=max_min * 60,
+                cpu=MODAL_CPU, memory=MODAL_MEM_GIB * 1024)
+            summary["sandbox_id"] = sb.object_id
+            print(f"gpu-run: Modal sandbox {sb.object_id} ({'/'.join(gpus)}, up to ${rate:.2f}/h with "
+                  f"{MODAL_CPU} cores, {MODAL_MEM_GIB} GiB, {image})", flush=True)
+            sb.filesystem.copy_from_local(tar_in, "/scratch/job.tar.gz")
+            summary["gpu_type"] = sandbox_sh(sb, "mkdir -p /scratch/job && tar -xzf /scratch/job.tar.gz -C /scratch/job"
+                                             " && rm /scratch/job.tar.gz && touch /scratch/inputs.stamp"
+                                             " && nvidia-smi --query-gpu=name --format=csv,noheader").strip()
+            summary["boot_s"] = round(time.time() - t_create)
+            print(f"gpu-run: sandbox up after {fmt_s(summary['boot_s'])} on {summary['gpu_type']}", flush=True)
+            out.mkdir(parents=True)
+            t_start = time.time()
+            p = sb.exec("bash", "-c", "gpu-job run 2>&1", timeout=max(60, int(deadline - time.time()) - 120))
+            with open(out / "gpu-run.log", "w") as log:
+                for line in p.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log.write(line)
+            p.wait()
+            summary["job_s"] = round(time.time() - t_start)
+            summary["exit_status"] = "timeout" if time.time() > deadline - 180 and p.returncode else p.returncode
+            # every file the job created or changed since its inputs landed
+            sandbox_sh(sb, "cd /scratch/job && find . -type f -newer /scratch/inputs.stamp -print0"
+                           " | tar -czf /scratch/out.tar.gz --null -T -")
+            sb.filesystem.copy_to_local("/scratch/out.tar.gz", tar_out)
+            with tarfile.open(tar_out) as t:
+                t.extractall(out, filter="data")
+            summary["results"] = str(out)
+    finally:
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, signal.SIG_IGN)
+        if sb is not None:
+            sb.terminate()
+        finish(summary, t_create, rate, out)
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, signal.default_int_handler)
+    return summary
+
+
+def modal_sandboxes():
+    """The gpu-run app's running Modal sandboxes ([] when Modal is not set up)."""
+    try:
+        import modal
+        return list(modal.Sandbox.list(app_id=modal.App.lookup(MODAL_APP).app_id))
+    except Exception:
+        return []
 
 
 def secure_prices():
@@ -311,74 +446,127 @@ def secure_prices():
             for t in types if t.get("secureCloud") and (t.get("lowestPrice") or {}).get("stockStatus")}
 
 
-def cmd_gpus(args):
-    aliases = {i: name for name, ids in GPUS.items() for i in ids}
-    for gid, (price, mem, stock) in sorted(secure_prices().items(), key=lambda kv: kv[1][0]):
-        print(f"${price:>5.2f}/h  {gid:<48} {mem:>4} GB  {stock:<7} {aliases.get(gid, '')}")
+def schedule(tasks, slots, args):
+    """Run each task as its own `gpu-run run`, which ends its own pod or sandbox (also on Ctrl-C).
 
-
-def cmd_bench(args):
-    """The same job on several GPUs, --parallel at a time, each in its own `gpu-run run`. A run starts only if
-    what is spent, plus the worst case of the runs going (rate x --max-min), plus its own worst case stays
-    within --budget. A GPU with no free instance is tried again later, three times in all."""
-    prices = secure_prices()
-    work = Path(tempfile.mkdtemp(prefix="gpu-run-bench-"))
-    queue = [(g, 1, 0.0) for g in args.gpus.split(",")]  # (gpu, attempt, not before)
+    tasks: [{"job": dir, "gpu": name or None}]. slots: [(backend, runs at a time, default gpu)], in order of
+    preference: a task takes the first backend with a free slot whose GPU choice isn't cooling down. A run starts
+    only if the money spent, plus the worst case of the runs going, plus its own worst case (rate x --max-min)
+    stays within --budget. "No free GPU" cools that choice down for 5 min and puts the task back (5 tries)."""
+    work = Path(tempfile.mkdtemp(prefix="gpu-run-"))
+    stock, stock_t, cool, n = {}, 0.0, {}, 0
+    pending = [dict(t, tries=0, since=time.time()) for t in tasks]
     running, rows, spent = {}, [], 0.0
-    print(f"gpu-run: bench: {len(queue)} GPUs, {args.parallel} at a time, budget ${args.budget:.2f}; logs in {work}")
+
+    def rate(backend, gpu):  # $/h of the dearest card the choice covers; None when RunPod stocks none of them
+        nonlocal stock, stock_t
+        if backend == "modal":
+            return modal_rate(gpu)
+        if time.time() - stock_t > 300:
+            stock, stock_t = secure_prices(), time.time()
+        return max((stock[i][0] for i in GPUS.get(gpu, [gpu]) if i in stock), default=None)
+
+    print(f"gpu-run: {len(tasks)} runs; " + ", ".join(f"{b} {k} at a time" + (f" ({g})" if g else "") for b, k, g in slots)
+          + f"; budget ${args.budget:.2f}; logs in {work}", flush=True)
     try:
-        while queue or running:
-            for item in [q for q in queue if q[2] <= time.time()]:
-                if len(running) >= args.parallel:
+        while pending or running:
+            now = time.time()
+            for t in list(pending):
+                choices = []  # (backend, slots, gpu, $/h or None when nothing is free to try now)
+                for backend, k, default_gpu in slots:
+                    gpu = t["gpu"] or default_gpu
+                    r_h = None if cool.get((backend, gpu), 0) > now else rate(backend, gpu)
+                    if r_h is None and cool.get((backend, gpu), 0) <= now:
+                        cool[(backend, gpu)] = now + 300  # RunPod stocks none of this choice
+                    choices.append((backend, k, gpu, r_h))
+                if all(c[3] is not None and spent + c[3] * args.max_min / 60 > args.budget for c in choices):
+                    reason = "its worst case would pass the budget"
+                elif now - t["since"] > 1800:
+                    reason = "no free GPU for 30 min"
+                else:
+                    reason = None
+                if reason:
+                    pending.remove(t)
+                    rows.append({"job": Path(t["job"]).name, "gpu": t["gpu"] or "-", "backend": "-",
+                                 "error": f"not run: {reason}"})
+                    continue
+                reserved = sum(r["worst"] for r in running.values())
+                for backend, k, gpu, r_h in choices:
+                    worst = None if r_h is None else r_h * args.max_min / 60
+                    if (r_h is None or sum(r["backend"] == backend for r in running.values()) >= k
+                            or spent + reserved + worst > args.budget):
+                        continue
+                    n += 1
+                    js, log = work / f"{n:03d}.json", work / f"{n:03d}.log"
+                    p = subprocess.Popen([sys.executable, __file__, "run", t["job"], "--backend", backend,
+                                          "--gpu", gpu, "--max-min", str(args.max_min), "--disk", str(args.disk),
+                                          "--image", args.image, "--summary-json", str(js)],
+                                         stdout=open(log, "wb"), stderr=subprocess.STDOUT)
+                    running[p] = dict(task=t, backend=backend, gpu=gpu, worst=worst, js=js, log=log)
+                    pending.remove(t)
+                    print(f"gpu-run: {Path(t['job']).name} -> {backend} {gpu} (${r_h:.2f}/h, worst ${worst:.2f}; "
+                          f"spent ${spent:.2f}; log {log.name})", flush=True)
                     break
-                queue.remove(item)
-                gpu, attempt, _ = item
-                rate = max((prices[i][0] for i in GPUS.get(gpu, [gpu]) if i in prices), default=None)
-                if rate is None:
-                    rows.append({"gpu": gpu, "error": "not in Secure Cloud stock"})
-                    continue
-                worst = rate * args.max_min / 60
-                if spent + worst > args.budget:
-                    rows.append({"gpu": gpu, "error": f"skipped: its ${worst:.2f} worst case would pass the budget"})
-                    continue
-                if spent + sum(r[2] for r in running.values()) + worst > args.budget:
-                    queue.append((gpu, attempt, time.time() + 30))  # wait for the runs going to settle
-                    continue
-                slug = re.sub(r"[^a-z0-9]+", "-", gpu.lower()).strip("-")
-                js, log = work / f"{slug}-{attempt}.json", work / f"{slug}-{attempt}.log"
-                p = subprocess.Popen([sys.executable, __file__, "run", args.job_dir, "--gpu", gpu,
-                                      "--max-min", str(args.max_min), "--disk", str(args.disk),
-                                      "--image", args.image, "--summary-json", str(js)],
-                                     stdout=open(log, "wb"), stderr=subprocess.STDOUT)
-                running[p] = (gpu, attempt, worst, js)
-                print(f"gpu-run: bench: {gpu} started (${rate:.2f}/h, worst ${worst:.2f}, spent ${spent:.2f})",
-                      flush=True)
             time.sleep(5)
             for p in [p for p in running if p.poll() is not None]:
-                gpu, attempt, _, js = running.pop(p)
-                r = json.loads(js.read_text()) if js.exists() else {"gpu": gpu, "error": "no summary"}
-                spent += r.get("cost_est", 0)
-                if NO_STOCK.search(r.get("error", "")) and attempt < 3:
-                    queue.append((gpu, attempt + 1, time.time() + 300))
-                    print(f"gpu-run: bench: {gpu}: no free instance; trying again in 5 min", flush=True)
+                r = running.pop(p)
+                s = json.loads(r["js"].read_text()) if r["js"].exists() else {"error": f"no summary (exit {p.returncode})"}
+                spent += s.get("cost_est", 0)
+                name = Path(r["task"]["job"]).name
+                if NO_STOCK.search(s.get("error", "")) and r["task"]["tries"] < 4:
+                    cool[(r["backend"], r["gpu"])] = time.time() + 300
+                    r["task"].update(tries=r["task"]["tries"] + 1, since=time.time())
+                    pending.insert(0, r["task"])  # ahead of jobs that have not started yet
+                    print(f"gpu-run: {name}: no free {r['gpu']} on {r['backend']}; trying elsewhere or later", flush=True)
                     continue
-                rows.append(r)
-                print(f"gpu-run: bench: {gpu} finished: exit {r.get('exit_status', r.get('error'))}, "
-                      f"${r.get('cost_est', 0):.2f}; spent ${spent:.2f}", flush=True)
+                rows.append(dict(s, job=name, backend=r["backend"], gpu=s.get("gpu", r["gpu"])))
+                print(f"gpu-run: {name} on {r['backend']} {s.get('gpu_type', r['gpu'])} finished: "
+                      f"exit {s.get('exit_status', s.get('error'))}, ${s.get('cost_est', 0):.2f}; spent ${spent:.2f}",
+                      flush=True)
     finally:
-        for p in running:  # interrupted: every run terminates its own pod
+        for p in running:  # interrupted: every run ends its own pod or sandbox
             p.send_signal(signal.SIGINT)
         for p in running:
             p.wait()
-    ok = sorted((r for r in rows if "job_s" in r), key=lambda r: r["cost_est"])
-    print(f"\n{'GPU':<34} {'job':>9} {'pod':>9} {'$/h':>6} {'$/run':>7} {'$ job only':>10}  exit")
-    for r in ok:
-        print(f"{r['gpu_type']:<34} {fmt_s(r['job_s']):>9} {fmt_s(r['pod_s']):>9} {r['rate_per_h']:>6.2f} "
-              f"{r['cost_est']:>7.2f} {r['rate_per_h'] * r['job_s'] / 3600:>10.2f}  {r['exit_status']}")
-    for r in rows:
-        if "job_s" not in r:
-            print(f"{r.get('gpu_type', r['gpu']):<34} {r.get('error', r.get('exit_status'))}")
+    print(f"\n{'job':<22} {'backend':<7} {'GPU':<34} {'job':>8} {'pod':>8} {'$/h':>6} {'$/run':>6}  exit")
+    for r in sorted(rows, key=lambda r: (r["job"], r.get("cost_est", 0))):
+        if "job_s" in r:
+            print(f"{r['job'][:22]:<22} {r['backend']:<7} {r.get('gpu_type', r['gpu'])[:34]:<34} {fmt_s(r['job_s']):>8} "
+                  f"{fmt_s(r['pod_s']):>8} {r['rate_per_h']:>6.2f} {r['cost_est']:>6.2f}  {r['exit_status']}")
+        else:
+            print(f"{r['job'][:22]:<22} {r['backend']:<7} {r.get('gpu', '-')[:34]:<34} {str(r.get('error', r.get('exit_status')))[:90]}")
     print(f"spent about ${spent:.2f} of ${args.budget:.2f}")
+    return rows
+
+
+def cmd_bench(args):
+    """The same job on several RunPod GPU types."""
+    schedule([{"job": args.job_dir, "gpu": g} for g in args.gpus.split(",")], [("runpod", args.parallel, None)], args)
+
+
+def cmd_sweep(args):
+    """Many jobs at once, each on its own GPU: RunPod's pool first, Modal's when RunPod has none free."""
+    slots = [(b, k, g) for b, k, g in (("runpod", args.runpod, args.runpod_gpu), ("modal", args.modal, args.modal_gpu))
+             if k > 0]
+    if not slots:
+        sys.exit("gpu-run: sweep needs --runpod N or --modal N")
+    if args.modal:
+        modal_rate(args.modal_gpu)  # an unknown Modal GPU fails here, before anything starts
+    missing = [j for j in args.job_dirs if not (Path(j) / "run.sh").is_file()]
+    if missing:
+        sys.exit(f"gpu-run: no run.sh in {', '.join(missing)}")
+    rows = schedule([{"job": j, "gpu": None} for j in args.job_dirs], slots, args)
+    if any(r.get("exit_status") != 0 for r in rows):
+        sys.exit(1)
+
+
+def cmd_gpus(args):
+    aliases = {}
+    for name, ids in GPUS.items():
+        for i in ids:
+            aliases.setdefault(i, []).append(name)
+    for gid, (price, mem, stock) in sorted(secure_prices().items(), key=lambda kv: kv[1][0]):
+        print(f"${price:>5.2f}/h  {gid:<48} {mem:>4} GB  {stock:<7} {','.join(aliases.get(gid, []))}")
 
 
 def cmd_list(args):
@@ -387,45 +575,63 @@ def cmd_list(args):
         print(f"{p['id']:<16} {p.get('desiredStatus', ''):<11} {gpu_name(p):<26} "
               f"${hourly_rate(p):>5.2f}/h  {p.get('name', '')}")
     if not pods:
-        print("gpu-run: no pods on the account")
+        print("gpu-run: no pods on the RunPod account")
+    for sb in modal_sandboxes():
+        print(f"{sb.object_id:<28} Modal sandbox (app {MODAL_APP})")
 
 
 def cmd_kill_all(args):
     pods = [p for p in list_pods() if p.get("name", "").startswith(NAME_PREFIX)]
-    if not pods:
-        print("gpu-run: no gpu-run pods")
+    sandboxes = modal_sandboxes()
+    if not pods and not sandboxes:
+        print("gpu-run: no gpu-run pods or sandboxes")
         return
     for p in pods:
         print(f"{p['id']:<16} {p.get('desiredStatus', ''):<11} {gpu_name(p):<26} {p.get('name', '')}")
-    if not args.yes and input(f"terminate these {len(pods)} pods? [y/N] ").strip().lower() != "y":
+    for sb in sandboxes:
+        print(f"{sb.object_id:<28} Modal sandbox")
+    if not args.yes and input(f"terminate these {len(pods) + len(sandboxes)}? [y/N] ").strip().lower() != "y":
         return
     for p in pods:
         if terminate(p["id"]):
             print(f"gpu-run: terminated {p['id']}")
+    for sb in sandboxes:
+        sb.terminate()
+        print(f"gpu-run: terminated {sb.object_id}")
 
 
 def main():
     for s in (signal.SIGTERM, signal.SIGHUP):  # a closed terminal or a kill still terminates the pod
         signal.signal(s, signal.default_int_handler)
     argv = sys.argv[1:]
-    if argv and argv[0] not in ("run", "bench", "gpus", "list", "kill-all", "-h", "--help"):
+    if argv and argv[0] not in ("run", "sweep", "bench", "gpus", "list", "kill-all", "-h", "--help"):
         argv = ["run"] + argv
     ap = argparse.ArgumentParser(prog="gpu-run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "bench"):
+    for name in ("run", "sweep", "bench"):
         p = sub.add_parser(name)
-        p.add_argument("job_dir")
-        if name == "run":
-            p.add_argument("--gpu", default="a100", help="a100, h100, smoke (the cheapest cards) or a RunPod GPU id")
-            p.add_argument("--keep", action="store_true", help="leave the pod running (debugging)")
-        p.add_argument("--max-min", type=int, default=240, help="give up on the job after N minutes")
-        p.add_argument("--disk", type=int, default=100, help="container disk in GB (holds /scratch)")
-        p.add_argument("--image", default=IMAGE)
-        if name == "run":
-            p.add_argument("--summary-json", help=argparse.SUPPRESS)  # for bench
+        if name == "sweep":
+            p.add_argument("job_dirs", nargs="+")
         else:
-            p.add_argument("--gpus", default="a100,h100", help="comma-separated --gpu values")
+            p.add_argument("job_dir")
+        if name == "run":
+            p.add_argument("--backend", choices=["runpod", "modal"], default="runpod")
+            p.add_argument("--gpu", default="a100", help="RunPod: a100, h100, cheap, fast, smoke or a GPU id; "
+                           "Modal: fast, a100, h100, h200, b200, l40s, cheap or a Modal GPU name")
+            p.add_argument("--keep", action="store_true", help="leave the pod running (debugging; RunPod only)")
+            p.add_argument("--summary-json", help=argparse.SUPPRESS)  # for sweep and bench
+        p.add_argument("--max-min", type=int, default=240, help="give up on a job after N minutes")
+        p.add_argument("--disk", type=int, default=100, help="RunPod container disk in GB (holds /scratch)")
+        p.add_argument("--image", default=IMAGE)
+        if name == "sweep":
+            p.add_argument("--runpod", type=int, default=4, help="RunPod pods at a time (0: none)")
+            p.add_argument("--runpod-gpu", default="cheap", help="RunPod --gpu choice for every job")
+            p.add_argument("--modal", type=int, default=0, help="Modal sandboxes at a time (0: none)")
+            p.add_argument("--modal-gpu", default="fast", help="Modal --gpu choice for every job")
+            p.add_argument("--budget", type=float, required=True, help="most to spend on the sweep, in $")
+        if name == "bench":
+            p.add_argument("--gpus", default="a100,h100", help="comma-separated RunPod --gpu values")
             p.add_argument("--budget", type=float, default=float("inf"), help="most to spend, in $")
             p.add_argument("--parallel", type=int, default=1, help="runs at a time")
     sub.add_parser("gpus")
@@ -434,17 +640,23 @@ def main():
     args = ap.parse_args(argv)
     try:
         if args.cmd == "run":
+            if args.keep and args.backend == "modal":
+                sys.exit("gpu-run: --keep is for RunPod pods")
             r = {}
             try:
-                run_job(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image, r)
-            except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
+                if args.backend == "modal":
+                    run_job_modal(args.job_dir, args.gpu, args.max_min, args.image, r)
+                else:
+                    run_job_runpod(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image, r)
+            except Exception as e:
                 r["error"] = str(e)
                 raise
             finally:
                 if args.summary_json:
                     Path(args.summary_json).write_text(json.dumps(r, indent=2) + "\n")
             sys.exit(0 if r.get("exit_status") == 0 else 1)
-        {"bench": cmd_bench, "gpus": cmd_gpus, "list": cmd_list, "kill-all": cmd_kill_all}[args.cmd](args)
+        {"sweep": cmd_sweep, "bench": cmd_bench, "gpus": cmd_gpus, "list": cmd_list,
+         "kill-all": cmd_kill_all}[args.cmd](args)
     except KeyboardInterrupt:
         sys.exit("\ngpu-run: interrupted")
     except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
