@@ -71,7 +71,7 @@ sm_86 (3080, A-series) and sm_90 (H100).
 ./gpu-run bench path/to/job --gpus a100,h100,"NVIDIA L40S" --parallel 3 --budget 10 --max-min 20
                                             # any GPUs, 3 at a time; never starts a run whose worst case
                                             # (rate x --max-min) could take spending past the budget
-./gpu-run path/to/job --backend modal --gpu fast   # one job in a Modal sandbox: B200, else H200, else H100
+./gpu-run path/to/job --backend modal --gpu fast   # one job in a Modal sandbox on a B200
 ./gpu-run list                              # every pod on the account, and gpu-run's Modal sandboxes
 ./gpu-run kill-all                          # terminate every gpu-run pod and sandbox (asks first; --yes skips)
 ```
@@ -93,8 +93,8 @@ directory's `results/`, as with a single run.
 - RunPod pools, from the benchmark (`src/openems_bench` in the workspace): **cheap** (cost per run): RTX
   A5000, RTX PRO 4500 Blackwell, RTX A6000, RTX PRO 4000 Blackwell, RTX 4090, RTX 6000 Ada; **fast**
   (speed): B200, H200, H100 SXM, H100 NVL, RTX PRO 6000 Blackwell. Also `a100`, `h100`, `smoke` or a
-  RunPod GPU id. Modal: **fast** (B200, H200, H100), **cheap** (L40S, A100 80 GB), `b200`, `h200`,
-  `h100`, `a100`, `l40s` or a Modal GPU name. For LP01-sized runs the cheap pool is about 3080 speed
+  RunPod GPU id. Modal takes one GPU type per sandbox: **fast** (B200), **cheap** (L40S), `b200`, `h200`,
+  `h100` (Modal may give an H200 at the H100 price), `a100`, `l40s` or a Modal GPU name. For LP01-sized runs the cheap pool is about 3080 speed
   for about $0.30 a run; the fast pool is about 3x faster for about $2-3.
 
 **Modal** runs the same image (its tailnet entrypoint cleared) in a Modal Sandbox: no tailnet, no

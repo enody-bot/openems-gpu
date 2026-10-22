@@ -58,11 +58,11 @@ GPUS = {
     "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090",
               "NVIDIA RTX A6000", "NVIDIA L4"],
 }
-# Modal GPU names per --gpu name, tried in this order ("H100" may get an H200 at the H100 price), and Modal's
-# prices in $/s (modal.com/pricing, 2026-10-22). Its B300 needs a CUDA 13 image, so it is left out.
+# Modal GPU per --gpu name (a Sandbox takes one GPU type, not a fallback list; "H100" may get an H200 at the
+# H100 price) and Modal's prices in $/s (modal.com/pricing, 2026-10-22). Its B300 needs a CUDA 13 image.
 MODAL_APP = "gpu-run"
-MODAL_GPUS = {"fast": ["B200", "H200", "H100"], "cheap": ["L40S", "A100-80GB"], "b200": ["B200"], "h200": ["H200"],
-              "h100": ["H100"], "a100": ["A100-80GB"], "l40s": ["L40S"]}
+MODAL_GPUS = {"fast": "B200", "cheap": "L40S", "b200": "B200", "h200": "H200", "h100": "H100", "a100": "A100-80GB",
+              "l40s": "L40S"}
 MODAL_PRICE_S = {"B200": 0.001736, "H200": 0.001261, "H100": 0.001097, "RTX-PRO-6000": 0.000842,
                  "A100-80GB": 0.000694, "L40S": 0.000542, "A10": 0.000306, "L4": 0.000222}
 MODAL_CPU, MODAL_MEM_GIB = 4, 32                   # per sandbox: model setup runs on the CPU
@@ -328,11 +328,11 @@ def run_job_runpod(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary
 
 
 def modal_rate(gpu):
-    """$/h of the dearest GPU a Modal --gpu name may get, plus the sandbox's CPU and memory."""
-    names = MODAL_GPUS.get(gpu, [gpu])
-    if any(n not in MODAL_PRICE_S for n in names):
+    """$/h of the GPU a Modal --gpu name stands for, plus the sandbox's CPU and memory."""
+    name = MODAL_GPUS.get(gpu, gpu)
+    if name not in MODAL_PRICE_S:
         raise RuntimeError(f"unknown Modal GPU {gpu!r}: use one of {', '.join(MODAL_GPUS)} or {', '.join(MODAL_PRICE_S)}")
-    return 3600 * (max(MODAL_PRICE_S[n] for n in names) + MODAL_CPU * MODAL_CPU_S + MODAL_MEM_GIB * MODAL_MEM_S)
+    return 3600 * (MODAL_PRICE_S[name] + MODAL_CPU * MODAL_CPU_S + MODAL_MEM_GIB * MODAL_MEM_S)
 
 
 def sandbox_sh(sb, command):
@@ -368,7 +368,7 @@ def run_job_modal(job, gpu, max_min, image=IMAGE, summary=None):
 
     summary = {} if summary is None else summary
     job, out = new_run(job, gpu, "modal", summary)
-    gpus = MODAL_GPUS.get(gpu, [gpu])
+    modal_gpu = MODAL_GPUS.get(gpu, gpu)
     rate = modal_rate(gpu)
     image = image_digest(image)
     summary.update(image=image, rate_per_h=round(rate, 3))
@@ -382,10 +382,10 @@ def run_job_modal(job, gpu, max_min, image=IMAGE, summary=None):
                 t.add(job, arcname=".", filter=lambda m: None if m.name == "./results" or m.name.startswith("./results/") else m)
             sb = modal.Sandbox.create(
                 "sleep", "infinity", app=modal.App.lookup(MODAL_APP, create_if_missing=True),
-                image=modal.Image.from_registry(image).entrypoint([]), gpu=gpus, timeout=max_min * 60,
+                image=modal.Image.from_registry(image).entrypoint([]), gpu=modal_gpu, timeout=max_min * 60,
                 cpu=MODAL_CPU, memory=MODAL_MEM_GIB * 1024)
             summary["sandbox_id"] = sb.object_id
-            print(f"gpu-run: Modal sandbox {sb.object_id} ({'/'.join(gpus)}, up to ${rate:.2f}/h with "
+            print(f"gpu-run: Modal sandbox {sb.object_id} ({modal_gpu}, ${rate:.2f}/h with "
                   f"{MODAL_CPU} cores, {MODAL_MEM_GIB} GiB, {image})", flush=True)
             sb.filesystem.copy_from_local(tar_in, "/scratch/job.tar.gz")
             summary["gpu_type"] = sandbox_sh(sb, "mkdir -p /scratch/job && tar -xzf /scratch/job.tar.gz -C /scratch/job"
