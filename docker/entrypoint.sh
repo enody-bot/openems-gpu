@@ -67,8 +67,11 @@ echo "entrypoint: watchdog stops this pod after ${MAX_RUNTIME_MIN} min"
 
 [ -n "${TS_OAUTH:-}" ] || fail "TS_OAUTH is not set (RunPod secret TS_OAUTH missing from the pod env)"
 
+# --statedir: with --state=mem: alone tailscaled has nowhere to keep Tailscale SSH's host keys, and SSH
+# accepts connections but never answers (Tailscale's own container image passes both flags the same way)
 env -u TS_OAUTH -u RUNPOD_API_KEY \
-  tailscaled --tun=userspace-networking --state=mem: --socket="$SOCK" >/var/log/tailscaled.log 2>&1 &
+  tailscaled --tun=userspace-networking --state=mem: --statedir=/tmp/tailscale --socket="$SOCK" \
+  >/var/log/tailscaled.log 2>&1 &
 TAILSCALED=$!
 for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
 

@@ -37,6 +37,9 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/openems-gpu:${{ github.sha }}
             ghcr.io/${{ github.repository_owner }}/openems-gpu:latest
+          # keeps the build stage, so a change to docker/*.sh rebuilds only the last layers
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build info
         run: docker run --rm --entrypoint cat ghcr.io/${{ github.repository_owner }}/openems-gpu:${{ github.sha }} /opt/openEMS/BUILD-INFO.txt

@@ -47,8 +47,10 @@ GPUS = {
     "smoke": ["NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090",
               "NVIDIA RTX A6000", "NVIDIA L4"],
 }
-# The image is built with CUDA 12.6: only hosts whose driver supports 12.6 or later.
-CUDA_VERSIONS = ["12.6", "12.7", "12.8", "12.9", "13.0"]
+# The image is built with CUDA 12.6, so the host driver must support 12.6 or later. RunPod's REST filter
+# (allowedCudaVersions) stops at 13.0 while its hosts already run 13.2 (2026-10), so gpu-run checks the
+# driver on the pod instead.
+MIN_CUDA = (12, 6)
 BOOT_TIMEOUT_S = 20 * 60  # image pull and tailnet join
 WATCHDOG_GRACE_MIN = 10   # the pod's own watchdog fires this long after --max-min
 
@@ -90,7 +92,7 @@ def api(method, path, body=None):
 
 
 def list_pods():
-    pods = api("GET", "/pods") or []
+    pods = api("GET", "/pods?includeMachine=true") or []
     return pods.get("pods", []) if isinstance(pods, dict) else pods
 
 
@@ -111,7 +113,6 @@ def create_pod(name, gpu, max_min, disk, image):
         "gpuTypeIds": GPUS.get(gpu, [gpu]),
         "gpuTypePriority": "custom",
         "gpuCount": 1,
-        "allowedCudaVersions": CUDA_VERSIONS,
         "containerDiskInGb": disk,
         "volumeInGb": 0,
         "ports": [],
@@ -181,6 +182,16 @@ class Node:
     def rsync(self, src, dst, *opts):
         subprocess.run(["rsync", "-a", "-e", shlex.join(self.ssh), *opts, src, dst], check=True)
 
+    def driver_cuda(self):
+        """The CUDA version the host's driver supports, from nvidia-smi on the pod. The first SSH command
+        also waits out Tailscale SSH starting up after the node shows online."""
+        for _ in range(8):
+            r = self.run("nvidia-smi", capture_output=True, text=True)
+            if r.returncode == 0:
+                return re.search(r"CUDA Version:\s*([0-9.]+)", r.stdout).group(1)
+            time.sleep(10)
+        raise RuntimeError(f"no SSH to the pod: {r.stderr.strip()[-300:]}")
+
     def follow(self, log, deadline):
         """Stream the job's output until it ends, reconnecting after a dropped connection; its exit status."""
         offset = 0
@@ -226,11 +237,16 @@ def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE):
     node = None
     try:
         peer = wait_for_node(pod_id, host, min(deadline, t_create + BOOT_TIMEOUT_S))
-        pod = api("GET", f"/pods/{pod_id}")
+        pod = api("GET", f"/pods/{pod_id}?includeMachine=true")
         summary.update(gpu_type=gpu_name(pod), boot_s=round(time.time() - t_create))
-        print(f"gpu-run: {host} is up after {fmt_s(summary['boot_s'])} on {summary['gpu_type']}", flush=True)
         with tempfile.TemporaryDirectory() as tmp:
             node = Node(peer, tmp)
+            summary["driver_cuda"] = node.driver_cuda()
+            print(f"gpu-run: {host} is up after {fmt_s(summary['boot_s'])} on {summary['gpu_type']}, "
+                  f"driver CUDA {summary['driver_cuda']}", flush=True)
+            if tuple(map(int, summary["driver_cuda"].split("."))) < MIN_CUDA:
+                raise RuntimeError(f"the host driver supports CUDA {summary['driver_cuda']} only; the image needs "
+                                   f"{MIN_CUDA[0]}.{MIN_CUDA[1]}")
             node.rsync(f"{job}/", f"{node.ip}:/scratch/job/", "--exclude=/results/")
             node.run("gpu-job start", check=True)
             out.mkdir(parents=True)

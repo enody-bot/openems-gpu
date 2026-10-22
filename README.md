@@ -107,9 +107,9 @@ The image uses CUDA **12.6.3** (devel to build, base at run time):
 - The AMD 7.0.3 HIP headers the backend compiles against work with CUDA 12.6. 7.2.x needs CUDA 12.8+
   (`cudaMemcpyBatchAsync`), and 7.1.1 fails.
 - It supports sm_90 for the H100.
-- RunPod lets a pod request host CUDA versions (`allowedCudaVersions`; its API lists 11.8 to 13.0).
-  gpu-run asks for 12.6 to 13.0, so the pod never lands on a host whose driver is older than the
-  image.
+- The host's driver must support CUDA 12.6 or later. RunPod's REST filter for host CUDA versions
+  stops at 13.0, while its A100 and H100 hosts already run 13.2 (October 2026). So gpu-run reads the
+  driver's version on the pod with `nvidia-smi` and terminates the pod at once if it is older.
 
 ## Local check on the 3080 box
 
