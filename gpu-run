@@ -6,7 +6,8 @@
 """gpu-run: run an openEMS job on a RunPod GPU pod that joins the tailnet, then destroy the pod.
 
     gpu-run <job_dir> [--gpu a100|h100|smoke|<RunPod GPU id>] [--max-min N] [--keep]
-    gpu-run bench <job_dir> [--max-min N]     the same job on an A100 and an H100: time and cost per run
+    gpu-run bench <job_dir> [--gpus a100,h100,...] [--budget USD] [--parallel N] [--max-min N]
+                                              the same job on several GPUs: time and cost per run
     gpu-run gpus                              Secure Cloud GPUs in stock now, with prices
     gpu-run list                              every pod on the RunPod account
     gpu-run kill-all [--yes]                  terminate every pod gpu-run started
@@ -220,7 +221,11 @@ def fmt_s(s):
     return f"{int(s // 60)}m {int(s % 60):02d}s"
 
 
-def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE):
+def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE, summary=None):
+    """Run one job on one pod. `summary` (filled in as the run goes) holds the times and cost even when the
+    run raises."""
+    summary = {} if summary is None else summary
+    summary["gpu"] = gpu
     job = Path(job).resolve()
     if not (job / "run.sh").is_file():
         sys.exit(f"gpu-run: {job}/run.sh not found")
@@ -233,7 +238,7 @@ def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE):
     pod_id, rate = pod["id"], hourly_rate(pod)
     host = f"gpu-{pod_id}"
     print(f"gpu-run: pod {pod_id} ({gpu}, ${rate:.2f}/h, {image}); waiting for {host}", flush=True)
-    summary = {"job": str(job), "gpu": gpu, "pod_id": pod_id, "image": image, "rate_per_h": rate}
+    summary.update(job=str(job), pod_id=pod_id, image=image, rate_per_h=rate)
     node = None
     try:
         peer = wait_for_node(pod_id, host, min(deadline, t_create + BOOT_TIMEOUT_S))
@@ -289,25 +294,9 @@ def run_job(job, gpu, max_min, keep=False, disk=100, image=IMAGE):
     return summary
 
 
-def cmd_bench(args):
-    rows = []
-    for gpu in ("a100", "h100"):
-        try:
-            rows.append(run_job(args.job_dir, gpu, args.max_min, disk=args.disk, image=args.image))
-        except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
-            print(f"gpu-run: bench on {gpu} failed: {e}", file=sys.stderr)
-            rows.append({"gpu": gpu, "error": str(e)})
-    print(f"\n{'GPU':<26} {'job':>9} {'pod':>9} {'$/h':>6} {'$/run':>7} {'$ job only':>10}  exit")
-    for r in rows:
-        if "job_s" not in r:
-            print(f"{r.get('gpu_type', r['gpu']):<26} failed: {r.get('error', r.get('exit_status'))}")
-            continue
-        print(f"{r['gpu_type']:<26} {fmt_s(r['job_s']):>9} {fmt_s(r['pod_s']):>9} {r['rate_per_h']:>6.2f} "
-              f"{r['cost_est']:>7.2f} {r['rate_per_h'] * r['job_s'] / 3600:>10.2f}  {r['exit_status']}")
-
-
-def cmd_gpus(args):
-    """Secure Cloud GPU types in stock now, cheapest first (RunPod's GraphQL API; REST has no stock query)."""
+def secure_prices():
+    """{GPU id: (on-demand $/h, memory GB, stock)} for the types in Secure Cloud stock now (RunPod's GraphQL
+    API; REST has no stock query)."""
     q = ("query { gpuTypes { id memoryInGb secureCloud "
          "lowestPrice(input: {gpuCount: 1, secureCloud: true}) { uninterruptablePrice stockStatus } } }")
     req = urllib.request.Request(
@@ -316,11 +305,78 @@ def cmd_gpus(args):
                  "User-Agent": "gpu-run/1 (openems-gpu)"})
     with urllib.request.urlopen(req, timeout=60) as r:
         types = json.load(r)["data"]["gpuTypes"]
-    rows = sorted((t["lowestPrice"]["uninterruptablePrice"] or 0, t["id"], t["memoryInGb"], t["lowestPrice"]["stockStatus"])
-                  for t in types if t.get("secureCloud") and (t.get("lowestPrice") or {}).get("stockStatus"))
+    return {t["id"]: (t["lowestPrice"]["uninterruptablePrice"] or 0, t["memoryInGb"], t["lowestPrice"]["stockStatus"])
+            for t in types if t.get("secureCloud") and (t.get("lowestPrice") or {}).get("stockStatus")}
+
+
+def cmd_gpus(args):
     aliases = {i: name for name, ids in GPUS.items() for i in ids}
-    for price, gid, mem, stock in rows:
+    for gid, (price, mem, stock) in sorted(secure_prices().items(), key=lambda kv: kv[1][0]):
         print(f"${price:>5.2f}/h  {gid:<48} {mem:>4} GB  {stock:<7} {aliases.get(gid, '')}")
+
+
+def cmd_bench(args):
+    """The same job on several GPUs, --parallel at a time, each in its own `gpu-run run`. A run starts only if
+    what is spent, plus the worst case of the runs going (rate x --max-min), plus its own worst case stays
+    within --budget. A GPU with no free instance is tried again later, three times in all."""
+    prices = secure_prices()
+    work = Path(tempfile.mkdtemp(prefix="gpu-run-bench-"))
+    queue = [(g, 1, 0.0) for g in args.gpus.split(",")]  # (gpu, attempt, not before)
+    running, rows, spent = {}, [], 0.0
+    print(f"gpu-run: bench: {len(queue)} GPUs, {args.parallel} at a time, budget ${args.budget:.2f}; logs in {work}")
+    try:
+        while queue or running:
+            for item in [q for q in queue if q[2] <= time.time()]:
+                if len(running) >= args.parallel:
+                    break
+                queue.remove(item)
+                gpu, attempt, _ = item
+                rate = max((prices[i][0] for i in GPUS.get(gpu, [gpu]) if i in prices), default=None)
+                if rate is None:
+                    rows.append({"gpu": gpu, "error": "not in Secure Cloud stock"})
+                    continue
+                worst = rate * args.max_min / 60
+                if spent + worst > args.budget:
+                    rows.append({"gpu": gpu, "error": f"skipped: its ${worst:.2f} worst case would pass the budget"})
+                    continue
+                if spent + sum(r[2] for r in running.values()) + worst > args.budget:
+                    queue.append((gpu, attempt, time.time() + 30))  # wait for the runs going to settle
+                    continue
+                slug = re.sub(r"[^a-z0-9]+", "-", gpu.lower()).strip("-")
+                js, log = work / f"{slug}-{attempt}.json", work / f"{slug}-{attempt}.log"
+                p = subprocess.Popen([sys.executable, __file__, "run", args.job_dir, "--gpu", gpu,
+                                      "--max-min", str(args.max_min), "--disk", str(args.disk),
+                                      "--image", args.image, "--summary-json", str(js)],
+                                     stdout=open(log, "wb"), stderr=subprocess.STDOUT)
+                running[p] = (gpu, attempt, worst, js)
+                print(f"gpu-run: bench: {gpu} started (${rate:.2f}/h, worst ${worst:.2f}, spent ${spent:.2f})",
+                      flush=True)
+            time.sleep(5)
+            for p in [p for p in running if p.poll() is not None]:
+                gpu, attempt, _, js = running.pop(p)
+                r = json.loads(js.read_text()) if js.exists() else {"gpu": gpu, "error": "no summary"}
+                spent += r.get("cost_est", 0)
+                if "no instances" in r.get("error", "") and attempt < 3:
+                    queue.append((gpu, attempt + 1, time.time() + 300))
+                    print(f"gpu-run: bench: {gpu}: no free instance; trying again in 5 min", flush=True)
+                    continue
+                rows.append(r)
+                print(f"gpu-run: bench: {gpu} finished: exit {r.get('exit_status', r.get('error'))}, "
+                      f"${r.get('cost_est', 0):.2f}; spent ${spent:.2f}", flush=True)
+    finally:
+        for p in running:  # interrupted: every run terminates its own pod
+            p.send_signal(signal.SIGINT)
+        for p in running:
+            p.wait()
+    ok = sorted((r for r in rows if "job_s" in r), key=lambda r: r["cost_est"])
+    print(f"\n{'GPU':<34} {'job':>9} {'pod':>9} {'$/h':>6} {'$/run':>7} {'$ job only':>10}  exit")
+    for r in ok:
+        print(f"{r['gpu_type']:<34} {fmt_s(r['job_s']):>9} {fmt_s(r['pod_s']):>9} {r['rate_per_h']:>6.2f} "
+              f"{r['cost_est']:>7.2f} {r['rate_per_h'] * r['job_s'] / 3600:>10.2f}  {r['exit_status']}")
+    for r in rows:
+        if "job_s" not in r:
+            print(f"{r.get('gpu_type', r['gpu']):<34} {r.get('error', r.get('exit_status'))}")
+    print(f"spent about ${spent:.2f} of ${args.budget:.2f}")
 
 
 def cmd_list(args):
@@ -364,13 +420,27 @@ def main():
         p.add_argument("--max-min", type=int, default=240, help="give up on the job after N minutes")
         p.add_argument("--disk", type=int, default=100, help="container disk in GB (holds /scratch)")
         p.add_argument("--image", default=IMAGE)
+        if name == "run":
+            p.add_argument("--summary-json", help=argparse.SUPPRESS)  # for bench
+        else:
+            p.add_argument("--gpus", default="a100,h100", help="comma-separated --gpu values")
+            p.add_argument("--budget", type=float, default=float("inf"), help="most to spend, in $")
+            p.add_argument("--parallel", type=int, default=1, help="runs at a time")
     sub.add_parser("gpus")
     sub.add_parser("list")
     sub.add_parser("kill-all").add_argument("--yes", action="store_true")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "run":
-            r = run_job(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image)
+            r = {}
+            try:
+                run_job(args.job_dir, args.gpu, args.max_min, args.keep, args.disk, args.image, r)
+            except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
+                r["error"] = str(e)
+                raise
+            finally:
+                if args.summary_json:
+                    Path(args.summary_json).write_text(json.dumps(r, indent=2) + "\n")
             sys.exit(0 if r.get("exit_status") == 0 else 1)
         {"bench": cmd_bench, "gpus": cmd_gpus, "list": cmd_list, "kill-all": cmd_kill_all}[args.cmd](args)
     except KeyboardInterrupt:

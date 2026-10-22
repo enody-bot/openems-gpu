@@ -60,6 +60,9 @@ sm_86 (3080, A-series) and sm_90 (H100).
 ./gpu-run gpus                              # Secure Cloud GPUs in stock now, with prices
 ./gpu-run path/to/job --keep                # leave the pod up for debugging; prints how to reach it
 ./gpu-run bench path/to/job                 # same job on an A100, then an H100: time and $ per run
+./gpu-run bench path/to/job --gpus a100,h100,"NVIDIA L40S" --parallel 3 --budget 10 --max-min 20
+                                            # any GPUs, 3 at a time; never starts a run whose worst case
+                                            # (rate x --max-min) could take spending past the budget
 ./gpu-run list                              # every pod on the account
 ./gpu-run kill-all                          # terminate every gpu-run pod (asks first; --yes skips)
 ```
