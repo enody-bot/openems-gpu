@@ -35,9 +35,11 @@ sm_86 (3080, A-series) and sm_90 (H100).
 1. **Tailnet policy.** Apply [docs/tailnet-policy.md](docs/tailnet-policy.md), sections 1 and 2.
 2. **OAuth client and RunPod secret.** Same document, section 3: a Tailscale OAuth client with
    `auth_keys` write, limited to `tag:gpu-pod`, stored as the RunPod secret `TS_OAUTH`.
-3. **RunPod API key.** RunPod console, **Settings > API Keys**, create a key with read/write
-   access. Store it in the macOS keychain; this prompts for the value, so it stays out of the
-   shell history:
+3. **RunPod API key.** RunPod console, **Settings > API Keys**, create a restricted key with
+   **GraphQL: Read/Write** (pods are created, listed and terminated through it, also over the REST
+   API) and **api.runpod.ai: None** (that is the serverless API, which gpu-run doesn't use). A key
+   with GraphQL read only can list pods but gets an empty HTTP 403 on every create or terminate.
+   Store it in the macOS keychain; this prompts for the value, so it stays out of the shell history:
    ```bash
    security add-generic-password -U -a "$USER" -s runpod-api-key -w
    ```
