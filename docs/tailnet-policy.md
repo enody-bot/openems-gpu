@@ -10,15 +10,20 @@ You apply this yourself in the admin console (**Access controls**, JSON editor).
 
 ## 1. Check the existing policy first
 
-Look for any rule whose source is `"*"`, for example the default
-`{"action": "accept", "src": ["*"], "dst": ["*:*"]}`. `"*"` includes tagged devices, so the
-pods would get everything that rule grants. Narrow such rules before you add the pods: replace
-`"*"` with `"autogroup:member"` (the devices of tailnet members, no tagged devices) plus any tags
-that still need the access. For example, when machines tagged `tag:k8s` and `tag:k8s-operator`
-rely on that rule:
+Look for any rule with `"*"` on either side, for example the default
+`{"action": "accept", "src": ["*"], "dst": ["*:*"]}`. `"*"` includes tagged devices: as a source
+it would let the pods reach everything, and as a destination it would open the pods to everyone
+on every port. Tailscale has no deny rules, so spell such a rule out instead: `autogroup:member`
+(the devices of tailnet members, no tagged devices), the tags that rely on it, your subnet routes,
+and `autogroup:internet` if anyone uses an exit node. For example, with `tag:k8s`,
+`tag:k8s-operator` and a `10.0.0.0/16` subnet route:
 
 ```jsonc
-{"action": "accept", "src": ["autogroup:member", "tag:k8s", "tag:k8s-operator"], "dst": ["*:*"]}
+{
+  "action": "accept",
+  "src": ["autogroup:member", "tag:k8s", "tag:k8s-operator", "10.0.0.0/16"],
+  "dst": ["autogroup:member:*", "tag:k8s:*", "tag:k8s-operator:*", "10.0.0.0/16:*", "autogroup:internet:*"]
+}
 ```
 
 The `tests` below fail on save if a pod could still reach your workstation, which catches a rule
