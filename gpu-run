@@ -54,6 +54,8 @@ GPUS = {
 MIN_CUDA = (12, 6)
 BOOT_TIMEOUT_S = 20 * 60  # image pull and tailnet join
 WATCHDOG_GRACE_MIN = 10   # the pod's own watchdog fires this long after --max-min
+# RunPod's two wordings for "out of stock": "no instances currently available", "no longer any instances available"
+NO_STOCK = re.compile(r"no (longer any )?instances")
 
 
 class ApiError(Exception):
@@ -356,7 +358,7 @@ def cmd_bench(args):
                 gpu, attempt, _, js = running.pop(p)
                 r = json.loads(js.read_text()) if js.exists() else {"gpu": gpu, "error": "no summary"}
                 spent += r.get("cost_est", 0)
-                if "no instances" in r.get("error", "") and attempt < 3:
+                if NO_STOCK.search(r.get("error", "")) and attempt < 3:
                     queue.append((gpu, attempt + 1, time.time() + 300))
                     print(f"gpu-run: bench: {gpu}: no free instance; trying again in 5 min", flush=True)
                     continue
@@ -446,7 +448,7 @@ def main():
     except KeyboardInterrupt:
         sys.exit("\ngpu-run: interrupted")
     except (ApiError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as e:
-        hint = "\n(`gpu-run gpus` shows what Secure Cloud has in stock)" if "no instances" in str(e) else ""
+        hint = "\n(`gpu-run gpus` shows what Secure Cloud has in stock)" if NO_STOCK.search(str(e)) else ""
         sys.exit(f"gpu-run: {e}{hint}")
 
 
