@@ -1,0 +1,15 @@
+{
+  "_comment": "The LP01 bus shot: 4 s straight down while the edge runs the line (sim 0 -> 2.5 ns), then 6 s swinging down as the layers come apart (to 6 ns). Positions in KiCad mm; z above the board's bottom face. Keep an overhead position a hair off its target in y.",
+  "fps": 30, "duration_s": 10, "width": 1920, "height": 1080, "samples": 64,
+  "spacing_mm": 6.0, "anchor": "In4.Cu",
+  "keys": [
+    {"t": 0, "sim_ns": 0.0, "position": [138.5, 101.6, 420], "target": [138.5, 101.0, 1.6], "lens_mm": 85, "explode": 0},
+    {"t": 4, "sim_ns": 2.5, "position": [138.5, 101.6, 420], "target": [138.5, 101.0, 1.6], "lens_mm": 85, "explode": 0},
+    {"t": 10, "sim_ns": 6.0, "position": [105.0, 215.0, 75], "target": [140.5, 101.0, 18], "lens_mm": 35, "explode": 1}
+  ],
+  "opacity": {"F.Cu": 0.35, "In1.Cu": 0.08, "In2.Cu": 0.08, "In3.Cu": 0.25, "In4.Cu": 0.75, "B.Cu": 0.25},
+  "gain": {"E_above_In4": 0.6, "H_In3_face": 0.25, "E_above_board": 0.4},
+  "gamma": 0.8, "floor": 0.08,
+  "palette": ["#1b3cff", "#18c8d8", "#7ce35a", "#f9e64f", "#ffffff"],
+  "background": "#07090c", "bloom": 0.5
+}

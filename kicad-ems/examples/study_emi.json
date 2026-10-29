@@ -1,0 +1,14 @@
+{
+  "_comment": "Emission of a buck's switch node: a Gaussian pulse to 2 GHz with the far field on. kems.post emi then applies the switcher's harmonics (f, Vin, duty, edge) to E/V. Use the whole board as the region for emission: the planes radiate, not just the trace.",
+  "name": "BUCK_SW",
+  "board": "../board/main.kicad_pcb",
+  "nets": ["/Power/VLED_BUCK_SW"],
+  "excite": "/Power/VLED_BUCK_SW",
+  "drivers": {"Q702.5": 1.0},
+  "loads": {"default_C": 0},
+  "region": "board",
+  "fmax_hz": 2e9,
+  "mesh": {"fine": 0.05, "region": 0.1, "board": 1.0, "air_mm": 60},
+  "far_field": true,
+  "excitation": {"kind": "gauss"}
+}

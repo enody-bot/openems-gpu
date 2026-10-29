@@ -1,0 +1,15 @@
+{
+  "_comment": "A rail's impedance seen from one load pin: a 1 ohm port at the pin, the rail's capacitors as C bridged over their pads (their geometry gives the mounting inductance), the regulator's inductor as L. kems.post pdn reads Z = U / I.",
+  "name": "VCORE_PDN",
+  "board": "../board/main.kicad_pcb",
+  "nets": ["VCORE"],
+  "excite": "VCORE",
+  "drivers": {"U801.26": 1.0},
+  "loads": {"default_C": 0},
+  "open_refs": ["U801"],
+  "margin_mm": 3.0,
+  "fmax_hz": 2e9,
+  "mesh": {"fine": 0.05, "region": 0.1, "board": 1.0, "air_mm": 20},
+  "far_field": false,
+  "excitation": {"kind": "gauss"}
+}

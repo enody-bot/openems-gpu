@@ -1,0 +1,6 @@
+# local steps (triage, model, check, post, report, render textures); the pod needs only numpy and h5py, in the image
+numpy>=1.24
+matplotlib>=3.7
+h5py>=3.8
+pillow>=10
+reportlab>=4
