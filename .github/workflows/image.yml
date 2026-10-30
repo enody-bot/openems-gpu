@@ -1,9 +1,9 @@
 name: image
 
-# Builds the openEMS GPU image and pushes ghcr.io/<owner>/openems-gpu:<git sha> and :latest.
+# Builds the openEMS GPU image and pushes ghcr.io/<owner>/openems-gpu:<git sha>, and :latest from main only.
 on:
   push:
-    branches: [main]
+    branches: [main, openems-master]
     paths: [Dockerfile, docker/**, .github/workflows/image.yml]
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/openems-gpu:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/openems-gpu:latest
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/openems-gpu:latest', github.repository_owner) || '' }}
           # keeps the build stage, so a change to docker/*.sh rebuilds only the last layers
           cache-from: type=gha
           cache-to: type=gha,mode=max
