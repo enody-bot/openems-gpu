@@ -3,8 +3,9 @@
     python -m kems.report STUDY_DIR [--title "Board X 1.2.0: SI / EMI review"] [--out STUDY_DIR/report.pdf]
 
 Order: STUDY_DIR/SUMMARY.md (written last, by you or Claude: the ranked findings and what to change), TRIAGE.md (step
-1), then every FINDINGS_*.md under STUDY_DIR/runs/ (step 5, one section per run, sorted by path), then METHOD.md: the
-study's own, else kicad-ems's. Images resolve against the folder of the Markdown that references them. The Markdown reader takes
+1), every FINDINGS_*.md under STUDY_DIR/runs/ (step 5, one section per run, sorted by path), then a short note on
+method for the kinds of run present. The report is about the board: METHOD.md stays out of it. Images resolve against
+the folder of the Markdown that references them. The Markdown reader takes
 headings, paragraphs, bullets, numbered items, pipe tables, images and code blocks; nothing else."""
 import argparse
 import datetime
@@ -62,6 +63,11 @@ ST = {
     'code': ParagraphStyle('code', fontName=FM, fontSize=6.8, leading=8.6, textColor=INK, leftIndent=8, spaceAfter=4),
 }
 W = 7.0 * inch
+METHOD_NOTE = ('Full-wave FDTD simulation (openEMS) of a model built from the saved board: copper as lossless sheets, '
+               'drivers as ports with their data-sheet output resistance, receivers as capacitors.')
+METHOD_BY_KIND = {'emi': 'Emission is the board alone, without cables, at 3 m in the worst direction. It is not a '
+                         'compliance test: a margin under about 6 dB means measure it.',
+                  'pdn': 'Capacitor ESR is not modelled, so impedance peaks read high.'}
 
 
 def P(t, s='p'):
@@ -214,7 +220,7 @@ def main():
     date = datetime.date.today().isoformat()
     title = a.title or '%s: signal integrity and EMI review' % os.path.basename(study)
     story = [P(md_inline(title), 'title'),
-             P('openEMS FDTD on rented GPUs (kicad-ems, openems-gpu). %s.' % date, 'sub')]
+             P('Full-wave simulation with openEMS. %s.' % date, 'sub')]
     parts = [('SUMMARY.md', None), ('TRIAGE.md', 'Triage: what was looked at, and why')]
     for name, head in parts:
         md = read(os.path.join(study, name))
@@ -231,12 +237,10 @@ def main():
         for f in runs:
             story.append(CondPageBreak(2 * inch))
             story += md_story(open(f).read(), os.path.dirname(f), top=2)
-    md = read(os.path.join(study, 'METHOD.md')) or read(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), 'METHOD.md'))         # the study's own, else kicad-ems's
-    if md:
-        story.append(PageBreak())
-        story.append(P('Method and limits', 'h1'))
-        story += md_story(strip_title(md), study, top=2)
+    if runs:
+        kinds = [k for k in METHOD_BY_KIND if any(f.endswith('FINDINGS_%s.md' % k) for f in runs)]
+        story.append(P('Method', 'h2'))
+        story.append(P(' '.join([METHOD_NOTE] + [METHOD_BY_KIND[k] for k in kinds])))
     doc = SimpleDocTemplate(out, pagesize=letter, leftMargin=0.75 * inch, rightMargin=0.75 * inch,
                             topMargin=0.7 * inch, bottomMargin=0.7 * inch, title=title, author='kicad-ems')
 

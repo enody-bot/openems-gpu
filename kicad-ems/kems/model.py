@@ -4,15 +4,15 @@
 
 study.json (paths relative to it):
   {
-    "name": "LEFT_SCLK",
+    "name": "SPI_SCLK",
     "board": "../board/my.kicad_pcb",
-    "nets": ["/LED_LEFT_SCLK", "/LED_LEFT_MOSI"],       nets modelled in detail (their routes get the fine mesh)
-    "excite": "/LED_LEFT_SCLK",                         the net whose driver carries the source
+    "nets": ["/SPI_SCLK", "/SPI_MOSI"],                 nets modelled in detail (their routes get the fine mesh)
+    "excite": "/SPI_SCLK",                              the net whose driver carries the source
     "drivers": {"U801.60": 66, "U801.61": 66},          driver pads -> output resistance (ohm): lumped ports
     "loads": {"default_C": 4e-12, "U301.5": 4e-12},     every other pad of the nets: a capacitor to its reference
     "open_refs": ["J", "TP"],                           pads of these parts are left open (probe only)
     "passives": {"R939": 33.0},                         optional: values for 2-pad parts on the nets (else Value)
-    "self_c": {"L701": 3e-12},                          optional: winding C of inductors over L_SERIES_MAX (else 2 pF)
+    "self_c": {"L1": 3e-12},                            optional: winding C of inductors over L_SERIES_MAX (else 2 pF)
     "region": "auto",                                   or [x0, y0, x1, y1] (KiCad mm), or "board"; auto = the
                                                         nets + margin
     "margin_mm": 3.0,
@@ -132,7 +132,7 @@ def smooth(lines, max_res, ratio=1.3):
 def thirds_lines(edges, lo, hi, h):
     """edges: [(coordinate, +1 metal above / -1 below, length)] of long straight metal edges. Lines h/3 inside the
     metal and 2h/3 outside, longest edges first, each kept only 2h/3 from every line already kept; the gaps then cut
-    into cells of at most 1.3 h. On a uniform lattice an unresolved strip edge loads a line with capacitance (LP01:
+    into cells of at most 1.3 h. On a uniform lattice an unresolved strip edge loads a line with capacitance (measured:
     7.95 ps/mm on 0.05 mm cells against the field solver's 7.05; with these lines 7.04)."""
     merged = {}
     for c, side, ln in sorted(edges):

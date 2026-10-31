@@ -10,7 +10,7 @@ si   waveforms at every probe for a source swinging 0 -> --swing. An edge-excite
      excited band. Per probe on the driven net: 50 % delay after the source, peak, minimum, the deepest dip back
      while the edge is inside the input band (vil..vih of the swing: a dip there can double-clock an edge-triggered
      input), the end value. Per probe on other nets: the peak crosstalk.
-     Note: the FR-4 loss is a conductivity fixed at 1 GHz, which leaks at DC (LP01: receivers settle at 0.85-0.86 of
+     Note: the FR-4 loss is a conductivity fixed at 1 GHz, which leaks at DC (receivers settle a little under
      the swing). Judge levels against the settled value, and edges by their shape.
 emi  each source (kind:f:amplitude:duty:edge) as a trapezoid: at every harmonic n f, |c_n| = 2 A d |sinc(n d)| x
      min(1, 1 / (pi n tr f)) (the edge term as its envelope; 'switcher' takes the duty term as its envelope as well,

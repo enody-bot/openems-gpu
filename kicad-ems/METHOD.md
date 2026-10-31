@@ -1,7 +1,8 @@
 # Method, conventions and limits
 
-These are the rules kicad-ems encodes. Most were learned the hard way on LP01, each from a run that gave a wrong
-answer without failing. The report appends this file, so a reader can see how each number was made.
+These are the rules kicad-ems encodes. Most were learned the hard way on one six-layer board, each from a run that
+gave a wrong answer without failing. This is the reference for whoever runs the tool; the report itself carries only
+a short note on method.
 
 ## The solver
 
@@ -11,7 +12,7 @@ work went into openEMS master on 2026-10-17 as c3a956b and has changed there sin
 The numbers below are from ee45c6d unless they say otherwise; *Validation* compares master d686f1d. The repo's
 `examples/gpu-engine-check/` runs openEMS's own GPU-against-CPU comparison: 19 cases at ee45c6d, 28 at d686f1d.
 
-| Machine | Measured on LP01 models |
+| Machine | Measured on 25-45 M-cell board models |
 |---|---|
 | Apple M1, CPU engine | ~0.25 GCells/s |
 | Apple M1, the branch's Metal backend | ~0.5-0.6 GCells/s |
@@ -22,7 +23,7 @@ The numbers below are from ee45c6d unless they say otherwise; *Validation* compa
 One run of a 25-45 M-cell, 8 ns model is 3-6 minutes of solver time on a 5090. Pod start, image pull and copy-back
 add 5-10 minutes of wall time, which is billed.
 
-**The packaged tool, benchmarked** (2026-10-29): the LP01 LEFT bus model, 35.2 M cells, 135,700 steps (8 ns), one
+**The packaged tool, benchmarked** (2026-10-29): a bus model, 35.2 M cells, 135,700 steps (8 ns), one
 pod per class at once on RunPod Secure Cloud. Prices are RunPod's on the day.
 
 | GPU | $/h | Solver | GCells/s | openEMS setup | Job wall | Cost |
@@ -60,8 +61,8 @@ few percent under the swing, and DC results are wrong; see *Limits*.
 - **Never a series R-L-C.** openEMS runs it as a float32 recursion, and at decoupling values that recursion
   diverges.
 - **No lumped L over 100 nH.** A series power inductor is modelled as its winding capacitance: well above its
-  self-resonance (tens of MHz) that is what it is, and as a lumped L it breaks the solver. On LP01 the buck's
-  3.3 µH L701 took the run to NaN within 3,000 steps, on the GPU and on the Metal engine alike; without it the run
+  self-resonance (tens of MHz) that is what it is, and as a lumped L it breaks the solver. A buck's 3.3 µH
+  choke took the run to NaN within 3,000 steps, on the GPU and on the Metal engine alike; without it the run
   was finite. The default winding C is 2 pF; give `self_c` per part from the data sheet's SRF,
   C = 1 / ((2π SRF)² L).
 
@@ -72,7 +73,7 @@ pad. `model.py` moves every terminal onto a node; `check.py` verifies it.
 **Copper sheets sit exactly on z mesh lines.** openEMS places a zero-thickness polygon only on a z line equal to
 its elevation. A stackup sum such as 1.5740000000000003 misses the line at 1.574, and the sheet is dropped with
 nothing but an "Unused primitive" warning in the log. kicad-ems rounds every z to the mesh's 10 nm grid and
-fails the check on any mismatch. On LP01 this dropped F.Cu and In1 from a whole bus model: the driver's port
+fails the check on any mismatch. This once dropped F.Cu and In1 from a whole bus model: the driver's port
 then fed an isolated pad and read |u| / R|i| = 182 instead of ~0.8.
 
 **The mesh.**
@@ -133,8 +134,7 @@ spectrum of a raised-cosine edge.
 
 ## Emission (`post.py emi`)
 
-The far field comes from an NF2FF box round the board, per volt of source, in every direction. In the conventions
-used for LP01:
+The far field comes from an NF2FF box round the board, per volt of source, in every direction, in these conventions:
 
 **Source spectrum.** Each harmonic n f of a trapezoid of amplitude A, duty d and edge tr has
 |c_n| = 2 A d |sinc(n d)| · min(1, 1 / (π n tr f)).
@@ -153,7 +153,7 @@ at 10 m is scaled to 3 m (+10.5 dB), giving 40.5 / 47.5 dBµV/m below / above 23
 **Not modelled.** Spread spectrum, the quasi-peak detector, cables and the antenna height scan.
 
 **Run length.** Emission runs use a fixed length, not the -40 dB energy stop. The stop is tested every ~2,000
-steps while a ringing board's energy swings ±5 dB, so it fires on a dip. On LP01 it ended two flash-clock runs at
+steps while a ringing board's energy swings ±5 dB, so it fires on a dip. It once ended two clock runs at
 less than 40 % of their length, with the radiating current still only 1.5-14 dB down.
 
 ## Power-plane impedance (`post.py pdn`)
@@ -175,7 +175,7 @@ one kind share the scale, so brightness compares across planes and runs.
 hides the fields inside it. Fields are emission added over what is behind them.
 
 **Rendering.** Cycles on the GPU, in Blender 4.1.1. There are no kernels for Blackwell cards. Measured on an
-RTX 3080 (CUDA, OIDN): the full LEFT bus shot, 300 frames at 1920 × 1080 and 32 samples with 4 field sheets, took
+RTX 3080 (CUDA, OIDN): a full bus shot, 300 frames at 1920 × 1080 and 32 samples with 4 field sheets, took
 4.3 s a frame, 21 minutes in all, in 2.5 GB of VRAM. The 960 × 540, 16-sample preview took 1.4 s a frame.
 
 **Image sequences and frame_offset.** Blender clamps the scene frame to the sequence's `frame_duration` *before* it
@@ -196,8 +196,7 @@ These hold for every result:
 
 ## Validation
 
-What has been checked, as of 2026-10-30. The runs, numbers and PDF are in LP01's
-`simulation/kems_validation/` (SUMMARY.md, `kems_validation_report.pdf`, `master_check/RESULTS.md`).
+What has been checked, as of 2026-10-30.
 
 **Against openEMS master d686f1d** (2026-10-30), on the same GPU classes as the ee45c6d runs:
 - The engine check passed 28 of 28 cases on HIP, worst deviation 4.2e-7 of the peak.
@@ -207,16 +206,13 @@ What has been checked, as of 2026-10-30. The runs, numbers and PDF are in LP01's
   while the two backends agree to 2e-7. The change was not traced to a commit. Master's drawing tolerance and its
   lumped-RLC frequency limit are the candidates.
 
-**Triage against KiCad DRC.** Three LP01 boards: the main board, the PD card and the Wi-Fi card. Triage's copper
+**Triage against KiCad DRC.** Three boards: a six-layer main board and two small cards. Triage's copper
 connectivity matched kicad-cli DRC on every net. It found, independently:
-- the ten opens behind `jumper_pad_groups` on the LP01 main board, which the LP01 study had found by its own
-  copper walk;
-- two on the PD card (USB_JTAG_DP / DN through U1's flow-through pads), which DRC confirms once the groups are
-  removed.
+- the ten opens behind `jumper_pad_groups` on the main board, already found by a separate copper walk;
+- two on a card (a USB pair through a part's flow-through pads), which DRC confirms once the groups are removed.
 
-**SI against the LP01 study's own model.** The LP01 LEFT SPI bus, eight nets, seven drivers, built by `model.py`
-straight from the board: 35.2 M cells, 8 ns, on cloud GPUs. Against the LP01 study's separately built model of
-the same bus (2026-10-24, RTX 5090):
+**SI against a separate model.** An SPI bus, eight nets, seven drivers, built by `model.py` straight from the board:
+35.2 M cells, 8 ns, on cloud GPUs. Against a separately built model of the same bus (2026-10-24, RTX 5090):
 - delays at the four receivers within 0.6 % (1.749 / 1.738 ns at the far end);
 - the fall on the rising edge within 0.02 V;
 - peaks within 1.5 %;
@@ -225,12 +221,12 @@ the same bus (2026-10-24, RTX 5090):
 **Determinism.** The same job on an RTX PRO 4500, RTX PRO 6000 Blackwell, A100 and H100 gave bit-identical
 waveforms.
 
-**Emission.** The LM5148 buck's switch node on one LP01 main board, in free space, 60 ns:
+**Emission.** A buck's switch node on one board, in free space, 60 ns:
 - **The physics.** The board's half-wave mode shows at 440 MHz, against ~460-490 MHz expected for a 305 mm strip.
 - **The assumption.** The assumed winding capacitance of the 3.3 µH choke, swept over 0.5-6 pF, moved the worst
   FCC margin by 1.8 dB (+23.1 to +21.3 dB at ~1.47 GHz).
-- **Not compared.** The LP01 study's emission result was for two boards and the flex, a 600 mm assembly, so it
-  is not a like-for-like check.
+- **Not compared.** The earlier emission result was for two boards and a flex, a 600 mm assembly, so it is not a
+  like-for-like check.
 
 **Model and check.**
 - The bus and buck models pass the check.
@@ -241,8 +237,6 @@ waveforms.
 - The buck's NaN (a lumped 3.3 µH L) was not caught before the run. The check now fails it.
 
 **Rendering.** The bus run's four field planes, rendered with `scene.py` on an RTX 3080: 300 frames at 1080p.
-
-**The report.** `report.py` built the validation PDF from SUMMARY.md, four runs' findings and this file.
 
 **Pending.**
 - A PDN run. The VCORE model still shorts to GND at a 0.05 mm mesh.

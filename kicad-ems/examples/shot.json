@@ -1,5 +1,5 @@
 {
-  "_comment": "The LP01 bus shot: 4 s straight down while the edge runs the line (sim 0 -> 2.5 ns), then 6 s swinging down as the layers come apart (to 6 ns). Positions in KiCad mm; z above the board's bottom face. Keep an overhead position a hair off its target in y.",
+  "_comment": "A bus shot: 4 s straight down while the edge runs the line (sim 0 -> 2.5 ns), then 6 s swinging down as the layers come apart (to 6 ns). Positions in KiCad mm; z above the board's bottom face. Keep an overhead position a hair off its target in y.",
   "fps": 30, "duration_s": 10, "width": 1920, "height": 1080, "samples": 64,
   "spacing_mm": 6.0, "anchor": "In4.Cu",
   "keys": [

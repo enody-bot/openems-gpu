@@ -25,7 +25,7 @@ from collections import defaultdict
 import numpy as np
 from matplotlib.path import Path
 
-# measured on LP01 board models (37-43 M cells): GCells/s and $/h (RunPod Secure Cloud / Modal, October 2026)
+# measured on 37-43 M-cell board models: GCells/s and $/h (RunPod Secure Cloud / Modal, October 2026)
 GPUS = [('RTX 3080 (local)', 5.1, 0.0), ('RTX A5000, RunPod', 5.0, 0.27), ('RTX 5090, RunPod', 13.8, 1.19),
         ('B200, Modal', 20.5, 6.9)]
 BOOT_MIN = 3.0                 # pod start, image pull and copy-back, billed
@@ -121,8 +121,8 @@ def check(M, tend=None, png=None):
         if e.get('series'):
             fails.append('%s is a series R-L-C: openEMS (float32) runs it unstable; use its ESL or a plain C' % e['name'])
         if e.get('L') is not None and e['L'] > 100e-9:
-            fails.append('%s is a lumped L of %.3g H: above ~100 nH openEMS goes to NaN in a few thousand steps (LP01 '
-                         'L701, 3.3 uH); model it as its winding C (model.py does)' % (e['name'], e['L']))
+            fails.append('%s is a lumped L of %.3g H: above ~100 nH openEMS goes to NaN in a few thousand steps; '
+                         'model it as its winding C (model.py does)' % (e['name'], e['L']))
         if sum(e.get(k) is not None for k in ('R', 'L', 'C')) > 1 and e.get('L') is not None and e.get('C') is not None:
             warns.append('%s has both L and C (a parallel LC): check its resonance is intended' % e['name'])
     # ---- edge owners per sheet in the region, shorts and pieces

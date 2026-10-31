@@ -96,7 +96,7 @@ directory's `results/`, as with a single run.
   A5000, RTX PRO 4500 Blackwell, RTX A6000, RTX PRO 4000 Blackwell, RTX 4090, RTX 6000 Ada; **fast**
   (speed): B200, H200, H100 SXM, H100 NVL, RTX PRO 6000 Blackwell. Also `a100`, `h100`, `smoke` or a
   RunPod GPU id. Modal takes one GPU type per sandbox: **fast** (B200), **cheap** (L40S), `b200`, `h200`,
-  `h100` (Modal may give an H200 at the H100 price), `a100`, `l40s` or a Modal GPU name. For LP01-sized runs the cheap pool is about 3080 speed
+  `h100` (Modal may give an H200 at the H100 price), `a100`, `l40s` or a Modal GPU name. For 25-45 M-cell runs the cheap pool is about 3080 speed
   for about $0.30 a run; the fast pool is about 3x faster for about $2-3.
 
 **Modal** runs the same image (its tailnet entrypoint cleared) in a Modal Sandbox: no tailnet, no

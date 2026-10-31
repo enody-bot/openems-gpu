@@ -18,7 +18,7 @@ Per signal net:
   edge        the closest approach to the board outline
 Copper connectivity: every net's tracks, vias, pads and fills joined by geometry alone. A net in several pieces is an
 open; when only a footprint's jumper_pad_groups join the pieces, KiCad's DRC cannot see it (it treats the grouped pads
-as joined inside the part). Check the part's datasheet: LP01 had ten open lines through flow-through ESD arrays.
+as joined inside the part). Check the part's datasheet: flow-through ESD arrays are the usual case.
 Power rails: nets with zone fills or wide tracks, their layers, copper area and decoupling capacitors.
 
 The classification is a heuristic from net names. Read it against the schematic and correct it before ranking."""

@@ -2,10 +2,10 @@
 
 kicad-ems turns a KiCad board into openEMS models of the signals that matter, runs them on cloud GPUs through
 this repo's `gpu-run`, and writes a PDF report of what it found. It can also render a Blender animation of the
-fields on any line. It is the workflow Enody used on LP01, a six-layer lighting controller, cut down to five steps.
+fields on any line. It came out of the EM review of a six-layer board, cut down to five steps.
 
 The work splits by cost. Steps 1 to 3 are free and run on your machine. Step 4 is the only one that costs money:
-a 25 M-cell run of one bus is about **$0.05 on an RTX A5000** or **$0.13 on an RTX 5090**. LP01's whole
+a 25 M-cell run of one bus is about **$0.05 on an RTX A5000** or **$0.13 on an RTX 5090**. A whole
 emission study, 15 full-wave runs of two boards joined by a flex, cost **$22.26**.
 
 The easiest way in is [PROMPT.md](PROMPT.md). Give it to Claude Code (or another agent with a shell) in the board's
@@ -110,8 +110,7 @@ It prints the cell count, the time step and an estimate of minutes and dollars o
 ```
 
 The smoke job runs 6 % of the steps. On the pod it checks that:
-- the source drives its net: the ratio u / (R i) is about Z0 / R. An open port reads in the hundreds; on LP01
-  this is how the dropped-sheet bug above was found;
+- the source drives its net: the ratio u / (R i) is about Z0 / R. An open port reads in the hundreds;
 - the edge reaches the other pads;
 - no other net rings louder than the driven one;
 - the energy did not grow.
@@ -143,7 +142,7 @@ cp -r jobs/SCLK/results/*/out/SCLK study/runs/SCLK       # the report collects s
 1. `study/SUMMARY.md`: the ranked faults and what to change. You or Claude write it last.
 2. `TRIAGE.md`.
 3. Every run's findings.
-4. `METHOD.md`.
+4. A short note on method, for the kinds of run in the report. The full rules stay in `METHOD.md`, outside the PDF.
 
 ### Render: watch the edge run down the line
 
@@ -164,7 +163,7 @@ blender -b --factory-startup --python kems/render/scene.py -- render/SCLK exampl
 - **The render.** `make_render_job.py` packages the scene for a GPU pod with the official Blender 4.1.1 build.
   `--preview` is a quarter of the pixels at 16 samples.
 
-**Any NVIDIA card of Ampere or Ada class runs `scene.py` unchanged.** The LP01 bus shot, 300 frames at 1080p, took
+**Any NVIDIA card of Ampere or Ada class runs `scene.py` unchanged.** A bus shot, 300 frames at 1080p, took
 21 minutes on a local RTX 3080: `blender -b ... -- SCENE SHOT OUT.blend --render FRAMES/`, then ffmpeg. The
 cloud-pod wrapper `make_render_job.py` has not yet been run on gpu-run (see its docstring). Blender 4.1 has no kernels
 for Blackwell cards, so on RunPod use an A5000 / L40S / 4090 class GPU.
@@ -177,7 +176,7 @@ for Blackwell cards, so on RunPod use an A5000 / L40S / 4090 class GPU.
   as "measure this", not "passes".
 - **It is not a DC solver.** FR-4 loss is modelled as a conductivity fixed at 1 GHz, which leaks at DC. Use a DC
   grid solver for IR drop.
-- **It is not fully tested.** It is young code, packaged from the LP01 study scripts and exercised on one six-layer
+- **It is not fully tested.** It is young code, packaged from one study's scripts and exercised on one six-layer
   board and its cards. [METHOD.md](METHOD.md), *Validation*, says what has been checked and what has not.
 
 ## Files

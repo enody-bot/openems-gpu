@@ -1,9 +1,9 @@
 {
-  "_comment": "LP01's LEFT LED SPI bus: the P4 (U801) drives SCLK at its 10 mA setting (66 ohm) to three LP5861T (4 pF). The neighbours are held by their drivers so their crosstalk shows. Paths are relative to this file.",
-  "name": "LEFT_SCLK",
+  "_comment": "An SPI bus: the controller (U801) drives SCLK through 66 ohm, its drive setting from the data sheet, to three receivers (4 pF). The neighbours are held by their drivers so their crosstalk shows. Paths are relative to this file.",
+  "name": "SPI_SCLK",
   "board": "../board/main.kicad_pcb",
-  "nets": ["/LED_LEFT_SCLK", "/LED_LEFT_MOSI", "/LED_LEFT_VSYNC"],
-  "excite": "/LED_LEFT_SCLK",
+  "nets": ["/SPI_SCLK", "/SPI_MOSI", "/SPI_CS"],
+  "excite": "/SPI_SCLK",
   "drivers": {"U801.18": 66, "U801.19": 66, "U801.17": 66},
   "loads": {"default_C": 4e-12},
   "open_refs": ["J", "TP"],

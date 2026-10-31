@@ -98,6 +98,8 @@ the limits. Then work through these phases. Stop at each "ASK" and wait for my a
      4. what was not modelled.
      Be plain about the limits: emission margins under ~6 dB mean "measure it". Do not apply any change to the
      board.
+     Keep it about this board. Leave out kicad-ems itself: its benchmarks, GPU prices, validation results, where its
+     rules came from, and anything else from METHOD.md that isn't needed to read a number here.
    - Build the PDF with kems.report study/ and give me its path.
 
 6. RENDER (optional; ask)
