@@ -6,8 +6,10 @@ answer without failing. The report appends this file, so a reader can see how ea
 ## The solver
 
 openEMS is an FDTD solver: it steps E and H on a rectilinear (Yee) mesh in time. The GPU engine comes from
-SeanMollet/openEMS `GPU_merge` at ee45c6d (thliebig/openEMS PR #235), with its HIP backend compiled for NVIDIA. It
-is pre-release: the repo's `examples/gpu-engine-check/` runs openEMS's own GPU-against-CPU comparison, 19 cases.
+SeanMollet/openEMS `GPU_merge` at ee45c6d (thliebig/openEMS PR #235), with its HIP backend compiled for NVIDIA. The
+work went into openEMS master on 2026-10-17 as c3a956b and has changed there since; it is not in a tagged release.
+The numbers below are from ee45c6d unless they say otherwise; *Validation* compares master d686f1d. The repo's
+`examples/gpu-engine-check/` runs openEMS's own GPU-against-CPU comparison: 19 cases at ee45c6d, 28 at d686f1d.
 
 | Machine | Measured on LP01 models |
 |---|---|
@@ -194,8 +196,16 @@ These hold for every result:
 
 ## Validation
 
-What has been checked, as of 2026-10-29. The runs, numbers and PDF are in LP01's
-`simulation/kems_validation/` (SUMMARY.md, `kems_validation_report.pdf`).
+What has been checked, as of 2026-10-30. The runs, numbers and PDF are in LP01's
+`simulation/kems_validation/` (SUMMARY.md, `kems_validation_report.pdf`, `master_check/RESULTS.md`).
+
+**Against openEMS master d686f1d** (2026-10-30), on the same GPU classes as the ee45c6d runs:
+- The engine check passed 28 of 28 cases on HIP, worst deviation 4.2e-7 of the peak.
+- The bus model: every delay, peak, minimum and dip identical to 0.001 ns and 0.001 V; crosstalk within 0.5 mV.
+- The buck emission: both FCC margins identical, +22.3 and +17.2 dB at 1466 MHz.
+- Master is not bit-identical to ee45c6d: the quiet lines differ by about 2e-4 of the drive, on Metal and on HIP alike,
+  while the two backends agree to 2e-7. The change was not traced to a commit. Master's drawing tolerance and its
+  lumped-RLC frequency limit are the candidates.
 
 **Triage against KiCad DRC.** Three LP01 boards: the main board, the PD card and the Wi-Fi card. Triage's copper
 connectivity matched kicad-cli DRC on every net. It found, independently:

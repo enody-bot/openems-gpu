@@ -15,7 +15,9 @@ Mac ── RunPod API: terminate pod (finally: also on errors and Ctrl-C)
 ```
 
 The solver is the GPU openEMS the 3080 box runs, unchanged: SeanMollet/openEMS `GPU_merge` at
-ee45c6d (= thliebig/openEMS PR #235), its HIP backend compiled for NVIDIA by nvcc, in openEMS-Project
+ee45c6d (= thliebig/openEMS PR #235, since on openEMS master as c3a956b, not yet in a tagged release; the
+`openems-master` branch builds master d686f1d under a SHA tag, and `:latest` stays on ee45c6d until that branch is
+merged), its HIP backend compiled for NVIDIA by nvcc, in openEMS-Project
 v0.37.0 (CSXCAD c46e320, fparser 4b9c845). The image builds it the way the box's
 `openems-bench/BUILD.md` does, with GPU code for sm_61 (GTX 1070), sm_75 (2080 Ti), sm_80 (A100),
 sm_86 (3080, A-series) and sm_90 (H100).

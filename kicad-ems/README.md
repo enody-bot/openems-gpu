@@ -2,8 +2,7 @@
 
 kicad-ems turns a KiCad board into openEMS models of the signals that matter, runs them on cloud GPUs through
 this repo's `gpu-run`, and writes a PDF report of what it found. It can also render a Blender animation of the
-fields on any line. It is the workflow Enody used on the LP01 lighting controller, a six-layer board with an
-ESP32-P4, a 48 V buck and nine LED drivers, cut down to five steps.
+fields on any line. It is the workflow Enody used on LP01, a six-layer lighting controller, cut down to five steps.
 
 The work splits by cost. Steps 1 to 3 are free and run on your machine. Step 4 is the only one that costs money:
 a 25 M-cell run of one bus is about **$0.05 on an RTX A5000** or **$0.13 on an RTX 5090**. LP01's whole
@@ -12,10 +11,13 @@ emission study, 15 full-wave runs of two boards joined by a flex, cost **$22.26*
 The easiest way in is [PROMPT.md](PROMPT.md). Give it to Claude Code (or another agent with a shell) in the board's
 project folder, and it runs these steps with you, asking before anything that costs money.
 
-> **The solver is experimental.** The image runs openEMS's GPU engine from SeanMollet/openEMS `GPU_merge` at
-> ee45c6d, the branch under review as thliebig/openEMS PR #235. It is not in an openEMS release. Its HIP
-> backend is compiled for NVIDIA with nvcc (CUDA 12.6), so on these cards it is effectively a CUDA engine. The
-> repo's `examples/gpu-engine-check/` compares it with the CPU engines on 19 cases. Treat results as you would any
+> **The solver is new.** The image runs openEMS's GPU engine from SeanMollet/openEMS `GPU_merge` at ee45c6d, the
+> branch of thliebig/openEMS PR #235. That work went into openEMS master on 2026-10-17 as c3a956b, and master has
+> changed it since (the HIP backend is now a runtime plugin). It is not in a tagged release: v0.37.0 is older.
+> The `:latest` image is still ee45c6d. An image of master d686f1d, built from this repo's `openems-master` branch,
+> gave the same bus and emission results ([METHOD.md](METHOD.md), *Validation*). The HIP backend is compiled for
+> NVIDIA with nvcc (CUDA 12.6), so on these cards it is effectively a CUDA engine. The repo's
+> `examples/gpu-engine-check/` compares it with the CPU engines. Treat results as you would any
 > pre-release solver: cross-check a new kind of model against a CPU run or a 2-D field solve once.
 
 ## What you get
@@ -115,7 +117,9 @@ The smoke job runs 6 % of the steps. On the pod it checks that:
 - the energy did not grow.
 
 `run.sh` fails if openEMS fell back to the CPU without saying so. The `--budget` cap is hard: `gpu-run` never
-starts a run whose worst case, rate times `--max-min`, could take the spending past it. Results come back to
+starts a run whose worst case, rate times `--max-min`, could take the spending past it. `--max-min` counts from pod
+creation, so it includes the boot: set it to about 2x the expected job, because a slow host once took 18 minutes to
+come up. Results come back to
 `jobs/<NAME>/results/<UTC>-<gpu>/out/<NAME>/`.
 
 ### 5. Report: numbers, figures, PDF
